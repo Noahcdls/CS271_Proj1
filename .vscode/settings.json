@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "string.h": "c",
+        "in.h": "c",
+        "inet.h": "c",
+        "time.h": "c",
+        "blockchain.h": "c",
+        "sha-256.h": "c"
+    }
+}
