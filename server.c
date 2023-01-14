@@ -6,6 +6,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include "client_server_define.h"
+
 
 void error(const char *msg)
 {
@@ -15,6 +17,7 @@ void error(const char *msg)
 
 int main(int argc, char *argv[])
 {
+    pthread_mutex_init(&bank_lock, 0);
     int sockfd, newsockfd, portno;
     socklen_t clilen;
     char buffer[256];
@@ -45,7 +48,12 @@ int main(int argc, char *argv[])
                        &clilen);//accept a connection
     if (newsockfd < 0)
         error("ERROR on accept");
+    pthread_mutex_lock(&bank_lock);
+    client_count++; //increment number of clients available
     pid = fork();
+    if (pid > 0){
+        pthread_mutex_unlock(&bank_lock);
+    }
 
     if(pid == 0){//child process runs forever sending messages
         close(sockfd);

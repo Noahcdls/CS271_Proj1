@@ -14,16 +14,6 @@ void append_block(struct blockchain* insert, struct blockchain* head);
     if(insert == NULL || head == NULL){
         return;
     }
-    compute_hash(insert);
-    calc_sha_256(insert->prev_hash, &(head->transaction), sizeof(struct block));
     insert->prev = head;
-}   
-
-/*
-@brief compute individual hash of a block
-@param blk the block you want to find the hash of
-@note does not return a value. Stores in the my hash field
-*/
-void compute_hash(struct blockchain* blk){
-    calc_sha_256(blk->my_hash, &(blk->transaction), sizeof(struct block));
-}
+    calc_sha_256(insert->prev_hash, head, sizeof(struct blockchain));
+}    
