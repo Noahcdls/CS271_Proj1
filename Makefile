@@ -17,4 +17,4 @@ hash_test: hash_test.c sha-256.o
 
 
 clean:
-	rm client server
+	rm client server hash_test *.o
