@@ -7,7 +7,7 @@
  * @note Computes SHA-256 as part of process
  *
  */
-void append_block(struct blockchain* insert, struct blockchain* head);
+void append_block(struct blockchain* insert, struct blockchain* head)
 {
     if(insert == NULL || head == NULL){
         return;

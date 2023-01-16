@@ -24,6 +24,11 @@ void error(const char *msg)
     exit(0);
 }
 
+/*
+@brief clean up of file upon SIGKILL.
+Cancels and joins threads
+as well as closes socket
+*/
 void cleanup()
 {
     pthread_cancel(listening_thread);
@@ -118,7 +123,7 @@ void pop_queue(){
 @brief thread function to listen for messages and update the client on what to do
 @param socket the socket the client is reading from
 */
-void listen_message(int socket)
+void client_read(int socket)
 {
     int n;
     n = read(socket, rx_buffer, 1024);
@@ -131,13 +136,22 @@ void listen_message(int socket)
         case BALANCE: // response from bank to update the local balance so we can pick an amount to request
             memcpy((uint8_t *)&my_balance, *(rx_buffer + 1), sizeof(uint32_t));
         case REQ: // received a request to send
-        add_client_to_queue((struct client *)rx_buffer + 1)
-
-            case REPLY:
+            add_client_to_queue((struct client *)rx_buffer + 1);
+        case REPLY:
             reply_count++;
         }
     }
 }
+
+void client_send(){
+    
+}
+
+
+
+
+
+
 
 int main(int argc, char *argv[])
 {

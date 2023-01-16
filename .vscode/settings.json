@@ -5,6 +5,8 @@
         "inet.h": "c",
         "time.h": "c",
         "blockchain.h": "c",
-        "sha-256.h": "c"
+        "sha-256.h": "c",
+        "client_server_define.h": "c",
+        "types.h": "c"
     }
 }
