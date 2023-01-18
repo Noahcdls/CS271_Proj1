@@ -4,10 +4,14 @@
 #include <pthread.h>
 
 #define MAX_CLIENTS 64
-#define msg_size 128
+#define msg_size 4096 //4K bytes is adequate for data, including sending blockchain blocks
+#define REP_RCVD 1U
+#define REQ_RCVD (1U << 1)
+#define BAL_RCVD (1U << 2)
+#define LCK_RELEASE (1U << 3)
 volatile pthread_mutex_t bank_lock, msg_lock;
-volatile int client_count;
-volatile int next_id;
+volatile uint32_t client_count;
+volatile uint32_t next_id;
 static struct client client_ids[MAX_CLIENTS];//up to 64 users
 struct message_queue * msg_queue;
 struct message_queue * msg_tail;

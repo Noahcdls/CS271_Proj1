@@ -10,8 +10,11 @@
 #include "blockchain.h"
 #include <signal.h>
 
+uint8_t client_flags;
 uint8_t rx_buffer[msg_size], tx_buffer[msg_size];
-uint32_t my_balance;
+static uint32_t my_balance;
+static uint32_t counted_clients;
+static uint32_t pid;
 struct client_queue *queue;
 struct blockchain *block_chain;  // my copy of the blockchain. Acts as the head
 struct blockchain *next_block;   // next block to be committed
@@ -44,7 +47,7 @@ void cleanup()
 @brief A priority queue to add clients who are requesting transactions to occur
 in the bank
 @param req_client a pointer to the client we want to add.
-@note uses total Lamport time to determine ordering of queue
+@note DEPRECATED
 */
 void add_client_to_queue(struct client *req_client) // priority queue for adding clients to local queue
 {
@@ -110,14 +113,15 @@ void add_client_to_queue(struct client *req_client) // priority queue for adding
 @brief recompute hash of all items active in queue
 @note All committed blocks do not have to be recomputed
 */
-void recompute_hash(){
-    struct blockchain * cur_blk = block_chain;
-    while(cur_blk != rec_finished){
+void recompute_hash()
+{
+    struct blockchain *cur_blk = block_chain;
+    while (cur_blk != rec_finished && cur_blk != NULL)
+    {
         calc_sha_256(cur_blk->prev_hash, cur_blk->prev, sizeof(struct blockchain));
         cur_blk = cur_blk->prev;
     }
 }
-
 
 /*
 @brief add a block to the blockchain
@@ -135,7 +139,7 @@ void add_blockchain(struct blockchain *req_chain) // priority queue for adding c
             next_block = req_chain; // the chain was empty so we add this as the next block given it's incomplete
         else
             rec_finished = req_chain; // then already finished and since empty chain, we make it the most recently finished
-        
+
         return;
     }
     if (next_block == NULL)
@@ -163,11 +167,12 @@ void add_blockchain(struct blockchain *req_chain) // priority queue for adding c
         if (req_chain->transaction.lampstamp.time > cur_blk->transaction.lampstamp.time) // request occurs after cur_blk so append
         {
             req_chain->prev = cur_blk;
-            if(old_cur != NULL){
-                old_cur->prev = req_chain;//old cur is in queue. will recompute hash before return
+            if (old_cur != NULL)
+            {
+                old_cur->prev = req_chain; // old cur is in queue. will recompute hash before return
             }
-            if(cur_blk == block_chain)
-                block_chain = req_chain;//new head of the chain
+            if (cur_blk == block_chain)
+                block_chain = req_chain; // new head of the chain
             recompute_hash();
             return;
         }
@@ -176,13 +181,14 @@ void add_blockchain(struct blockchain *req_chain) // priority queue for adding c
             if (req_chain->transaction.lampstamp.client < cur_blk->transaction.lampstamp.client) // only add if id is less/higher priority
             {
                 old_cur = cur_blk;
-                cur_blk = cur_blk->prev;//advance to the next block
+                cur_blk = cur_blk->prev; // advance to the next block
             }
-            else{//same time but lower priority = append
+            else
+            { // same time but lower priority = append
                 req_chain->prev = cur_blk;
-                if(old_cur != NULL)
+                if (old_cur != NULL)
                     old_cur->prev = req_chain;
-                if(cur_blk == block_chain)
+                if (cur_blk == block_chain)
                     req_chain = block_chain;
                 recompute_hash();
                 return;
@@ -201,11 +207,11 @@ void add_blockchain(struct blockchain *req_chain) // priority queue for adding c
     }
     // cur_blk is now equal to rec_finished
     req_chain->prev = cur_blk; // req chain can now become the next block in the queue
-    if(next_block != NULL)
+    if (next_block != NULL)
         next_block->prev = req_chain;
     next_block = req_chain;
-    if(block_chain == cur_blk)
-        block_chain = req_chain; 
+    if (block_chain == cur_blk)
+        block_chain = req_chain;
     recompute_hash();
     return;
 }
@@ -213,24 +219,27 @@ void add_blockchain(struct blockchain *req_chain) // priority queue for adding c
 /*
 @brief Change status of next block to FINISHED or ABORT
 */
-void block_finished(uint8_t status){
+void block_finished(uint8_t status)
+{
     next_block->status = status;
     recompute_hash();
     rec_finished = next_block;
-    if(rec_finished == block_chain){//nothing left in queue
+    if (rec_finished == block_chain)
+    { // nothing left in queue
         next_block = NULL;
         return;
     }
-    struct blockchain* new_next = block_chain;
-    while(new_next != NULL){
-        if(new_next->prev == rec_finished){
+    struct blockchain *new_next = block_chain;
+    while (new_next != NULL)
+    {
+        if (new_next->prev == rec_finished)
+        {
             next_block = new_next;
             return;
         }
         new_next = new_next->prev;
     }
 }
-
 
 void *make_blockchain(uint32_t amount, uint32_t my_id, uint32_t recv_id)
 {
@@ -244,13 +253,25 @@ void *make_blockchain(uint32_t amount, uint32_t my_id, uint32_t recv_id)
     return new_block;
 }
 
+void *new_blockchain()
+{
+    struct blockchain *new_block = malloc(sizeof(struct blockchain));
+    return new_block;
+}
+
 void copy_blk(struct block *blk_src, struct blockchain *chain_dest)
 {
     memcpy(&(chain_dest->transaction), copy_blk, sizeof(struct block));
 }
 
+void copy_blockchain(struct blockchain *src_chain, struct blockchain *dest_chain)
+{
+    memcpy(dest_chain, src_chain, sizeof(struct blockchain));
+}
+
 /*
 @brief pops head of the client queue
+@note DEPRECATED
 */
 void pop_queue()
 {
@@ -267,28 +288,104 @@ void pop_queue()
 @brief thread function to listen for messages and update the client on what to do
 @param socket the socket the client is reading from
 */
-void client_read(int socket)
+void client_read(int socket = sockfd)
 {
     int n;
-    n = read(socket, rx_buffer, 1024);
+    n = read(socket, rx_buffer, msg_size);
     if (n)
     {
         switch (rx_buffer[0])
         {
-        case ABORT: // transaction failed
-            req_block->status = FAILED;
-        case BALANCE: // response from bank to update the local balance so we can pick an amount to request
-            memcpy((uint8_t *)&my_balance, *(rx_buffer + 1), sizeof(uint32_t));
-        case REQ: // received a request to send
-            add_client_to_queue((struct client *)rx_buffer + 1);
+        case ABORT:                      // transaction failed
+            next_block->status = FAILED; // we only receive this after we get lock so next block is our block
+            client_flags |= BAL_RCVD;    // flag sender that we have received FAILED from the bank.
+            printf("TRANSACTION ABORTED\n");
+            break;
+        case BALANCE:  // response from bank to update the local balance so we can pick an amount to request
+            memcpy(&my_balance, *(rx_buffer + 1), sizeof(uint32_t)); // copy over balance
+            printf("BALANCE RECEIVED\n");
+            client_flags |= BAL_RCVD;   // flag sender that we have received bank balance and updated our local knowledge of the value
+            break;
+        case REQ:                                            // received a request to send
+            struct blockchain *req_chain = new_blockchain(); // mkae a new blockchain member
+            struct blockchain *rcv_chain = (struct blockchain *)(rx_buffer + 1);
+            copy_blockchain(rcv_chain, req_chain); // copy the blockchain member that was sent over.
+            add_blockchain(req_chain);             // add it to our list. This will overwrite the prev ptr so it will be completely local after this
+            clock = max(clock, rcv_chain->transaction.lampstamp.time) + 1;
+            printf("BLOCK RECEIVED FROM CLIENT %u\n", rcv_chain->transaction.sender);
+            rx_buffer[0] = REPLY;
+            memcpy(rx_buffer + 1, &pid, sizeof(uint32_t));
+            write(socket, rx_buffer, msg_size); // send off the reply right away. No need to use write thread
+            break;
         case REPLY:
-            reply_count++;
+            reply_count++; // increase our reply count
+            printf("RECEIVED REPLY FROM CLIENT %d\n", (uint32_t *)(rx_buffer + 1)) if (reply_count == counted_clients)
+            {                             // if we recieved the amount of messages we anticipated, flag
+                client_flags |= REP_RCVD; // flag sender that we have received all replies
+                printf("ALL REPLIES RECEIVED\n");
+            }
+            break;
+        case RELEASE:
+            block_finished(rx_buffer[1]);
+            client_flags |= LCK_RELEASE; // flag sender to try again for the lock
+            printf("THE LOCK HAS BEEN RELEASED\n");
+            break;
         }
     }
 }
 
-void client_send()
+/*
+@brief The thread function for the client to send data
+@param socket the socket of the server we are operating on
+*/
+void client_send(int socket = sockfd)
 {
+    printf("WELCOME CLIENT" % u\n, pid); // AVAILABLE COMMANDS:\n1. BALANCE\n2. SEND\n3. PRINT BLOCKCHAIN", pid);
+    while (1)
+    {
+        printf("AVAILABLE COMMANDS:\n1. BALANCE\n2. SEND\n3. PRINT BLOCKCHAIN");
+        fgets(tx_buffer, msg_size, stdin);
+        uint8_t option = atoi(msg_size);
+        switch (option)
+        {
+        case 1:
+            tx_buffer[0] = BALANCE;
+            write(socket, tx_buffer, msg_size);
+            while(client_flags & BAL_RCVD != BAL_RCVD);
+            printf("MY BALANCE IS %u\n\n", my_balance); 
+            break;
+        case 2:
+            printf("WHO DO YOU WANT TO SEND TO? ");
+            fgets(tx_buffer, msg_size, stdin);
+            if(!check_valid_client(atoi(tx_buffer))){
+                printf("NOT A VALID CLIENT\n");
+                break;
+            }
+            uint32_t rec_client = atoi(tx_buffer);
+            printf("\nHOW MUCH WOULD YOU LIKE TO SEND? ");
+            fgets(tx_buffer, msg_size, stdin);
+            uint32_t trans_amount = atoi(tx_buffer);
+            struct blockchain* new_trans = make_blockchain(trans_amount, pid, rec_client);
+            
+
+            break;
+        case 3:
+            struct blockchain* cur_blk = block_chain;
+            while(cur_blk != NULL){
+                printf("SENDER: %u RECEIVER: %u AMOUNT: %u STATUS: %s\n",
+                    cur_blk->transaction.sender,
+                    cur_blk->transaction.recvr,
+                    cur_blk->transaction.amount,
+                    cur_blk->status == IN_PROG ? "IN PROG"
+                    : cur_blk->status == SUCCESS ? "SUCCESS" : "ABORT");
+                cur_blk = cur_blk->prev;
+            }
+            printf("/n");
+            break;
+        default:
+            break;
+        }
+    }
 }
 
 int main(int argc, char *argv[])
