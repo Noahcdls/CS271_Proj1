@@ -12,14 +12,13 @@
 volatile pthread_mutex_t bank_lock, msg_lock;
 volatile uint32_t client_count;
 volatile uint32_t next_id;
-static struct client client_ids[MAX_CLIENTS];//up to 64 users
+static struct client* client_ids[MAX_CLIENTS];//up to 64 users
 struct message_queue * msg_queue;
 struct message_queue * msg_tail;
 
 
 struct client{
     uint32_t id;
-    uint32_t time;
     uint32_t balance;
 };
 
@@ -31,7 +30,7 @@ struct client_queue{
 
 struct message_queue{
     uint32_t id;
-    uint8_t msg[1024];
+    uint8_t msg[msg_size];
     struct message_queue* next_msg;
 };
 

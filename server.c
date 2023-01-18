@@ -6,11 +6,17 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <signal.h>
 #include "client_server_define.h"
 #include "blockchain.h"
 
-pthread_t read_thread, write_thread;
+static pthread_t read_thread, write_thread;
+struct args{
+    int socket;
+    uint8_t * buffer;
+    uint32_t id;
 
+};
 /*
 @brief Initialize server by init mutexes and resetting client list and id values
 */
@@ -20,35 +26,47 @@ void server_init()
     pthread_mutex_init(&msg_lock, 0);
     pthread_mutex_lock(&bank_lock);
     for (int i = 0; i < MAX_CLIENTS; i++)
-        client_ids[1].id = 0;
+        client_ids[i] = NULL;
     next_id = 1;
     pthread_mutex_unlock(&bank_lock);
 }
 
 /*
+@brief cancel all threads to close the forked thread
+*/
+void cleanup(){
+    pthread_cancel(read_thread);
+    pthread_cancel(write_thread);
+    for(int i = 0; i < MAX_CLIENTS; i++){
+        free(client_ids[i]);//return client ids to memory
+    }
+}
+
+/*
 @brief Adds a client to the server, 
-returning the location in the location in the array 
-where the client data is stored
+returning the clients PID
 @note Need to send back client IDs for self ID
 */
-uint32_t add_client()
+void * add_client()
 {
     pthread_mutex_lock(&bank_lock); // can only add someone to the server if no one has the lock to prevent issues
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        if (client_ids[i].id == 0)
+        if (client_ids[i] == NULL)
         {
-            client_ids[i].id = next_id; // allocate the next_id
-            client_ids[i].balance = 10; // iniital value in account
-            client_ids[i].time = 0;     // iniital time in account
+            struct client * new_client = malloc(sizeof(struct client));//get a new client in memory
+            client_ids[i] = new_client;//add pointer to list
+            client_ids[i]->id = next_id; // allocate the next_id
+            client_ids[i]->balance = 10; // iniital value in account
+            // client_ids[i]->time = 0;     // iniital time in account
             next_id++;                  // increment the next available id. Goes by first come first serve on priority
             client_count++;
             pthread_mutex_unlock(&bank_lock); // release
-            return i;
+            return new_client;
         }
     }
     pthread_mutex_unlock(&bank_lock); // release
-    return 0;
+    return NULL;
 }
 
 /*
@@ -61,9 +79,10 @@ void remove_client(uint32_t pid)
     pthread_mutex_lock(&bank_lock); // can only remove someone to the server if no one has the lock to prevent issues
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        if (client_ids[i].id == pid)
+        if (client_ids[i]->id == pid)
         {
-            client_ids[i].id = 0;             // reset id
+            free(client_ids[i]);
+            client_ids[i] = NULL;             // reset id
             client_count--;                   // decrement active users
             pthread_mutex_unlock(&bank_lock); // release
             return;
@@ -118,8 +137,13 @@ void msg_pop()
 process requires its own buffer, socket, and client ID to be 
 dynamically made in run time
 */
-void server_read(uint32_t newsockfd, uint8_t *buffer, uint32_t pid)
+void * server_read(void * arguments)
 {
+
+    struct args * arg = arguments;
+    uint32_t newsockfd = arg->socket;
+    uint8_t * buffer = arg->buffer;
+    uint32_t pid = arg->id;
     while (1)
     {
 
@@ -128,8 +152,8 @@ void server_read(uint32_t newsockfd, uint8_t *buffer, uint32_t pid)
         {
         case BALANCE://send balance back to client. Sent back right away
             for(int i = 0; i < MAX_CLIENTS; i++){
-                if(client_ids[i].id == pid){
-                    memcpy(buffer + 1, &client_ids[i].balance, sizeof(uint32_t));
+                if(client_ids[i]->id == pid){
+                    memcpy(buffer + 1, &(client_ids[i]->balance), sizeof(uint32_t));
                     write(newsockfd, buffer, sizeof(uint8_t) + sizeof(uint32_t));
                     break;
                 }
@@ -138,9 +162,9 @@ void server_read(uint32_t newsockfd, uint8_t *buffer, uint32_t pid)
         case REQ://send req to all clients
             for (int i = 0; i < MAX_CLIENTS; i++)//add req to all clients to msg queue to send out
             {
-                if (client_ids[i].id != 0)
+                if (client_ids[i] != NULL)
                 {                                                                      // send messages to valid clients
-                    struct client_queue *req_msg = make_msg(buffer, client_ids[i].id); // make a message with the buffer content
+                    struct client_queue *req_msg = make_msg(buffer, client_ids[i]->id); // make a message with the buffer content
                     msg_push(req_msg);
                 }
             }
@@ -153,17 +177,29 @@ void server_read(uint32_t newsockfd, uint8_t *buffer, uint32_t pid)
             //same behavior as req
             for (int i = 0; i < MAX_CLIENTS; i++)//add req to all clients to msg queue to send out
             {
-                if (client_ids[i].id != 0)
+                if (client_ids[i] != NULL)
                 {                                                                      // send messages to valid clients
-                    struct client_queue *req_msg = make_msg(buffer, client_ids[i].id); // make a message with the buffer content
+                    struct client_queue *req_msg = make_msg(buffer, client_ids[i]->id); // make a message with the buffer content
                     msg_push(req_msg);
                 }
             }            
+            break;
+        case COMMIT://commit a transaction to the bank
+            struct blockchain * commit_chain = (struct blockchain *)(buffer+1);
+            for(int i = 0; i < MAX_CLIENTS; i++){
+                if(client_ids[i]!=NULL){
+                    if(client_ids[i]->id == commit_chain->transaction.sender)
+                        client_ids[i]->balance -= commit_chain->transaction.amount;
+                    if(client_ids[i]->id == commit_chain->transaction.recvr)
+                        client_ids[i]->balance += commit_chain->transaction.amount;
+                }
+            }
             break;
         default://do nothing
             break;
         }
     }
+    return NULL;
 }
 
 /*
@@ -173,8 +209,12 @@ to corresponding recipient
 @param buffer tx buffer used
 @param pid ID of client associated with forked process of server
 */
-void server_send(uint32_t newsockfd, uint8_t *buffer, uint32_t pid)
+void * server_send(void * arguments)
 {
+    struct args * arg = arguments;
+    uint32_t newsockfd = arg->socket;
+    uint8_t * buffer = arg->buffer;
+    uint32_t pid = arg->id;
     while (1)
     {
         if (msg_queue != NULL && (msg_queue->id == pid))
@@ -186,6 +226,7 @@ void server_send(uint32_t newsockfd, uint8_t *buffer, uint32_t pid)
             msg_pop();
         }
     }
+    return NULL;
 }
 
 /*
@@ -249,32 +290,55 @@ int main(int argc, char *argv[])
 
         if (pid == 0)
         { // child process runs forever sending messages
-            close(sockfd);
+            close(sockfd);//close old socket since this forked process doesnt need it
             uint8_t buffer[msg_size];
             uint8_t rx_buff[msg_size], tx_buff[msg_size];
-            while (1)
-            {
-                bzero(buffer, 256);
-                n = read(newsockfd, buffer, 255);
-                if (n < 0)
-                    error("ERROR reading from socket");
-                else if (n == 0)
-                {
-                    printf("Client %i has left\n", newsockfd);
-                    close(newsockfd);
-                    return 0;
-                }
-                printf("Here is the message: %s\n", buffer);
-                char messageback[100];
-                sprintf(messageback, "I got your message, client %i\n", newsockfd);
-                n = write(newsockfd, messageback, strlen(messageback));
-                if (n < 0)
-                {
-                    close(newsockfd);
-                    error("ERROR writing to socket");
-                    return 0;
-                }
-            }
+            struct client * client_ptr = add_client();
+            memcpy(tx_buff, client_ptr, sizeof(struct client));//send the connected client his PID and initial balance
+            n = write(newsockfd, tx_buff, msg_size);
+            struct args read_args, write_args;
+            
+            read_args.buffer = tx_buff;
+            write_args.buffer = rx_buff;
+
+            read_args.id = client_ptr->id;
+            write_args.id = client_ptr->id;
+
+            read_args.socket = newsockfd;
+            write_args.socket = newsockfd;
+
+            pthread_create(&read_thread, 0, &server_read, &read_args);
+            pthread_create(&write_thread, 0, &server_send, &write_args);
+            signal(SIGINT, cleanup);
+
+            pthread_join(read_thread, 0);
+            pthread_join(write_thread, 0);
+            remove_client(client_ptr->id);//remove client from the list
+            close(newsockfd);
+            return 0;//return this forked child
+            // while (1)
+            // {
+            //     bzero(buffer, 256);
+            //     n = read(newsockfd, buffer, 255);
+            //     if (n < 0)
+            //         error("ERROR reading from socket");
+            //     else if (n == 0)
+            //     {
+            //         printf("Client %i has left\n", newsockfd);
+            //         close(newsockfd);
+            //         return 0;
+            //     }
+            //     printf("Here is the message: %s\n", buffer);
+            //     char messageback[100];
+            //     sprintf(messageback, "I got your message, client %i\n", newsockfd);
+            //     n = write(newsockfd, messageback, strlen(messageback));
+            //     if (n < 0)
+            //     {
+            //         close(newsockfd);
+            //         error("ERROR writing to socket");
+            //         return 0;
+            //     }
+            // }
         }
     }
     close(sockfd);
