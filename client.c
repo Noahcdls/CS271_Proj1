@@ -16,9 +16,10 @@ static uint32_t my_balance;
 static uint32_t counted_clients;
 static uint32_t pid;
 struct client_queue *queue;
-struct blockchain *block_chain;  // my copy of the blockchain. Acts as the head
-struct blockchain *next_block;   // next block to be committed
-struct blockchain *rec_finished; // last block that was committed. Can be head if nothing queued to be committed
+struct blockchain *block_chain;       // my copy of the blockchain. Acts as the head
+struct blockchain *next_block;        // next block to be committed
+struct blockchain *rec_finished;      // last block that was committed. Can be head if nothing queued to be committed
+uint32_t active_clients[MAX_CLIENTS]; // holds pids of active clients
 
 int clock = 0, sockfd = 0, reply_count = 0;
 pthread_t listening_thread, sending_thread;
@@ -302,7 +303,6 @@ uint32_t check_valid_client(uint32_t client_id)
     return 0;
 }
 
-
 /*
 @brief thread function to listen for messages and update the client on what to do
 @param socket the socket the client is reading from
@@ -335,8 +335,8 @@ void *client_read(void *socket_fd)
             printf("BLOCK RECEIVED FROM CLIENT %u\n", rcv_chain->transaction.sender);
             rx_buffer[0] = REPLY;
             memcpy(rx_buffer + 1, &pid, sizeof(uint32_t));
-            sleep(2);//sleep two seconds before we send the message back for msg passing delay
-            //sleep will also help if we recieve another request from someone
+            sleep(2); // sleep two seconds before we send the message back for msg passing delay
+            // sleep will also help if we recieve another request from someone
             write(socket, rx_buffer, msg_size); // send off the reply right away. No need to use write thread
             break;
         case REPLY:
@@ -353,6 +353,31 @@ void *client_read(void *socket_fd)
             client_flags |= LCK_RELEASE; // flag sender to try again for the lock
             printf("THE LOCK HAS BEEN RELEASED\n");
             break;
+        case CLIENT_ADDED:
+            if (client_count < MAX_CLIENTS)
+            {
+                client_count++;
+                for (int i = 0; i < MAX_CLIENTS; i++)
+                {
+                    if (active_clients[i] == 0)
+                    {
+                        active_clients[i] = *((uint32_t *)(rx_buffer + 1));
+                        break;
+                    }
+                }
+            }
+            break;
+        case CLIENT_REMOVED:
+            client_count--;
+            uint32_t removed_client = *((uint32_t *)(rx_buffer + 1));
+            for (int i = 0; i < MAX_CLIENTS; i++)
+            {
+                if (active_clients[i] == removed_client)
+                {
+                    active_clients[i] = 0;
+                    break;
+                }
+            }
         }
     }
     return NULL;
@@ -377,12 +402,12 @@ void *client_send(void *socket_fd)
             tx_buffer[0] = BALANCE;
             write(socket, tx_buffer, msg_size);
             while (client_flags & BAL_RCVD != BAL_RCVD)
-                ;//wait for flag saying the balance has been received
+                ; // wait for flag saying the balance has been received
             printf("MY BALANCE IS %u\n\n", my_balance);
             client_flags &= ~BAL_RCVD; // clear balance receive flag
             break;
         case 2:
-            printf("WHO DO YOU WANT TO SEND TO? ");//start SEND process
+            printf("WHO DO YOU WANT TO SEND TO? "); // start SEND process
             fgets(tx_buffer, msg_size, stdin);
             if (!check_valid_client(atoi(tx_buffer)))
             {
@@ -395,35 +420,40 @@ void *client_send(void *socket_fd)
             uint32_t trans_amount = atoi(tx_buffer);
             struct blockchain *new_trans = make_blockchain(trans_amount, pid, rec_client);
             add_blockchain(new_trans);
-            tx_buffer[0] = REQ;//send out a request
-            memcpy(tx_buffer+1, new_trans, sizeof(struct blockchain));
-            counted_clients = client_count;//the scenario we will build is not quickly adding or removing clients so no need to lock
-            client_flags &= ~REP_RCVD;//clear reply flags
-            write(socket, tx_buffer, msg_size);//send out req
-            while(!(client_flags) & REP_RCVD);//wait until all replies are received
-            while(next_block->transaction.lampstamp.client != pid);
-            pthread_mutex(&bank_lock);
+            tx_buffer[0] = REQ; // send out a request
+            memcpy(tx_buffer + 1, new_trans, sizeof(struct blockchain));
+            counted_clients = client_count;     // the scenario we will build is not quickly adding or removing clients so no need to lock
+            client_flags &= ~REP_RCVD;          // clear reply flags
+            write(socket, tx_buffer, msg_size); // send out req
+            while (!(client_flags)&REP_RCVD)
+                ; // wait until all replies are received
+            while (next_block->transaction.lampstamp.client != pid)
+                ;
+            // pthread_mutex(&bank_lock);
             tx_buffer[0] = BALANCE;
             client_flags &= ~BAL_RCVD;
             write(socket, tx_buffer, msg_size);
-            while(!(client_flags & BAL_RCVD));
-            my_balance = *((uint32_t*)(tx_buffer+1));
-            if(my_balance < trans_amount){
+            while (!(client_flags & BAL_RCVD))
+                ;
+            my_balance = *((uint32_t *)(tx_buffer + 1));
+            if (my_balance < trans_amount)
+            {
                 tx_buffer[0] = RELEASE;
                 tx_buffer[1] = FAILED;
                 block_finished(FAILED);
                 write(socket, tx_buffer, msg_size);
             }
-            else{
+            else
+            {
                 tx_buffer[0] = COMMIT;
-                memcpy(tx_buffer+1, next_block, sizeof(struct blockchain));
+                memcpy(tx_buffer + 1, next_block, sizeof(struct blockchain));
                 write(socket, tx_buffer, msg_size);
                 block_finished(SUCCESS);
                 tx_buffer[0] = RELEASE;
                 tx_buffer[1] = SUCCESS;
                 write(socket, tx_buffer, msg_size);
             }
-            pthread_mutex_unlock(&bank_lock);
+            // pthread_mutex_unlock(&bank_lock);
             printf("TRANSACTION COMPLETE\n");
             break;
         case 3:
@@ -455,7 +485,10 @@ int main(int argc, char *argv[])
     int portno, n;                // socket and port number
     struct sockaddr_in serv_addr; // ip addr
     struct hostent *server;       // struct for host info
-
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        active_clients[i] = 0;
+    }
     char buffer[256];
     if (argc < 3)
     {
@@ -486,12 +519,10 @@ int main(int argc, char *argv[])
     n = read(sockfd, rx_buffer, msg_size);
     pid = ((struct client *)rx_buffer)->id;
     my_balance = ((struct client *)rx_buffer)->balance;
-
+    signal(SIGINT, cleanup);
     pthread_create(&listening_thread, 0, &client_read, &sockfd);
     pthread_create(&sending_thread, 0, &client_send, &sockfd);
-    signal(SIGINT, cleanup);
-    pthread_join(listening_thread, NULL);
-    pthread_join(sending_thread, NULL);
+    while(1);
 
     // while (1)
     // {

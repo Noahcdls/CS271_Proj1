@@ -20,6 +20,7 @@ struct message_queue * msg_tail;
 struct client{
     uint32_t id;
     uint32_t balance;
+    uint32_t loc;//location of client in managed list
 };
 
 struct client_queue{
@@ -35,12 +36,13 @@ struct message_queue{
 };
 
 enum commands{
-    ABORT = -1,
+    ABORT,
     BALANCE,
     REQ,
     REPLY,
     COMMIT,
     RELEASE,
-    CLIENT_ADDED
+    CLIENT_ADDED,
+    CLIENT_REMOVED
 };
 

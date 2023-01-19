@@ -6,15 +6,19 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <unistd.h>
 #include <signal.h>
 #include "client_server_define.h"
 #include "blockchain.h"
 
 // static pthread_t read_thread, write_thread;
-static pthread_t read_threads[MAX_CLIENTS], write_threads[MAX_CLIENTS];
-static uint8_t * tx_buffs[MAX_CLIENTS];
-static uint8_t * rx_buffs[MAX_CLIENTS];
+static pthread_t * read_threads[MAX_CLIENTS];
+static pthread_t * write_threads[MAX_CLIENTS];
+static uint8_t *tx_buffs[MAX_CLIENTS];
+static uint8_t *rx_buffs[MAX_CLIENTS];
 int client_disconnect[MAX_CLIENTS];
+struct args *read_args, *write_args;
+
 struct args
 {
     int socket;
@@ -30,10 +34,13 @@ void server_init()
     pthread_mutex_init(&bank_lock, 0);
     pthread_mutex_init(&msg_lock, 0);
     pthread_mutex_lock(&bank_lock);
-    for (int i = 0; i < MAX_CLIENTS; i++){
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
         client_ids[i] = NULL;
-        tx_buffs[i] = malloc(MAX_CLIENTS);//make malloc'd data for data buffers
+        tx_buffs[i] = malloc(MAX_CLIENTS); // make malloc'd data for data buffers
         rx_buffs[i] = malloc(MAX_CLIENTS);
+        read_threads[i] = NULL;
+        write_threads[i] = NULL;
         client_disconnect[i] = 0;
     }
     next_id = 1;
@@ -49,10 +56,12 @@ void cleanup()
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
         free(client_ids[i]); // return client ids to memory
-        free(tx_buffs[i]);//return buffer memory
+        free(tx_buffs[i]);   // return buffer memory
         free(rx_buffs[i]);
-        pthread_cancel(read_threads[i]);//clean up threads
+        pthread_cancel(read_threads[i]); // clean up threads
         pthread_cancel(write_threads[i]);
+        free(write_threads[i]);
+        free(read_threads[i]);
     }
     exit(0);
 }
@@ -73,6 +82,9 @@ void *add_client()
             client_ids[i] = new_client;                                // add pointer to list
             client_ids[i]->id = next_id;                               // allocate the next_id
             client_ids[i]->balance = 10;                               // iniital value in account
+            client_ids[i]->loc = i;
+            read_threads[i] = malloc(sizeof(pthread_t));//add pthread malloc
+            write_threads[i] = malloc(sizeof(pthread_t));
             // client_ids[i]->time = 0;     // iniital time in account
             next_id++; // increment the next available id. Goes by first come first serve on priority
             client_count++;
@@ -99,6 +111,8 @@ void remove_client(uint32_t pid)
             free(client_ids[i]);
             client_ids[i] = NULL;             // reset id
             client_count--;                   // decrement active users
+            free(read_threads[i]);
+            free(write_threads[i]);
             pthread_mutex_unlock(&bank_lock); // release
             return;
         }
@@ -222,8 +236,19 @@ void *server_read(void *arguments)
         }
     }
     client_disconnect[loc] = 1;
-    remove_client(pid);
     close(newsockfd);
+    remove_client(pid);
+    pthread_mutex_lock(&msg_lock);
+    for(int i = 0; i < MAX_CLIENTS; i++){
+        if(client_ids[i] != NULL){//send messages to all active clients saying this client is gone
+            struct message_queue * client_msg = malloc(sizeof(struct message_queue));
+            client_msg->id = client_ids[i]->id;
+            client_msg->msg[0] = CLIENT_REMOVED;
+            memcpy(client_msg->msg+1, &pid, sizeof(uint32_t));
+            msg_push(client_msg);
+        }
+    }
+    pthread_mutex_unlock(&msg_lock);
     return NULL;
 }
 
@@ -252,6 +277,7 @@ void *server_send(void *arguments)
             msg_pop();
         }
     }
+    client_disconnect[loc] = 0;
     return NULL;
 }
 
@@ -296,7 +322,7 @@ int main(int argc, char *argv[])
     if (bind(sockfd, (struct sockaddr *)&serv_addr,
              sizeof(serv_addr)) < 0)
         error("ERROR on binding");
-    listen(sockfd, 5);
+    listen(sockfd, MAX_CLIENTS);//listen up to 64 Clients
     clilen = sizeof(cli_addr);
     int pid;
     signal(SIGINT, cleanup);
@@ -313,25 +339,35 @@ int main(int argc, char *argv[])
         // child process runs forever sending messages
         // close(sockfd); // close old socket since this forked process doesnt need it
         uint8_t rx_buff[msg_size], tx_buff[msg_size];
-        struct client *client_ptr = add_client();
+        struct client *client_ptr = add_client();//add the client to the network
+        if(client_ptr == NULL) continue;
         memcpy(tx_buff, client_ptr, sizeof(struct client)); // send the connected client his PID and initial balance
-        n = write(newsockfd, tx_buff, msg_size);
-        struct args read_args, write_args;
+        n = write(newsockfd, tx_buff, msg_size);//write back its information so it can tell who it is
 
-        read_args.buffer = tx_buff;
-        write_args.buffer = rx_buff;
+        read_args->buffer = tx_buff;//write arguments for the threads
+        write_args->buffer = rx_buff;
 
-        read_args.id = client_ptr->id;
-        write_args.id = client_ptr->id;
+        read_args->id = client_ptr->id;
+        write_args->id = client_ptr->id;
 
-        read_args.socket = newsockfd;
-        write_args.socket = newsockfd;
+        read_args->socket = newsockfd;
+        write_args->socket = newsockfd;
 
-        pthread_create(&read_thread, 0, &server_read, &read_args);
-        pthread_create(&write_thread, 0, &server_send, &write_args);
+        read_args->loc = client_ptr->loc;
+        write_args->loc = client_ptr->loc;
 
-    
-}
-close(sockfd);
-return 0;
+        pthread_create(read_threads[client_ptr->loc], 0, &server_read, read_args);//run threads and then listen for another client again
+        pthread_create(write_threads[client_ptr->loc], 0, &server_send, write_args);
+        for(int i = 0; i < MAX_CLIENTS; i++){
+            if(client_ids[i] != NULL){//broadcast a new client has joined the server
+                struct message_queue * client_msg = malloc(sizeof(struct message_queue));
+                client_msg->id = client_ids[i]->id;
+                client_msg->msg[0] = CLIENT_ADDED;
+                memcpy(client_msg->msg+1, &(client_ptr->id), sizeof(uint32_t));
+                msg_push(client_msg);              
+            }
+        }
+    }
+    close(sockfd);
+    return 0;
 }
