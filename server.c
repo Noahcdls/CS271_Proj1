@@ -10,7 +10,9 @@
 #include "client_server_define.h"
 #include "blockchain.h"
 
+
 static pthread_t read_thread, write_thread;
+int client_disconnect = -1;
 struct args{
     int socket;
     uint8_t * buffer;
@@ -148,6 +150,7 @@ void * server_read(void * arguments)
     {
 
         int msg = read(newsockfd, buffer, msg_size);
+        if(msg == 0) break;
         switch (*buffer)
         {
         case BALANCE://send balance back to client. Sent back right away
@@ -215,7 +218,7 @@ void * server_send(void * arguments)
     uint32_t newsockfd = arg->socket;
     uint8_t * buffer = arg->buffer;
     uint32_t pid = arg->id;
-    while (1)
+    while (client_disconnect != 0)//while the read thread is not exiting
     {
         if (msg_queue != NULL && (msg_queue->id == pid))
         { // look to see if a message has my client's id
@@ -311,7 +314,7 @@ int main(int argc, char *argv[])
             pthread_create(&write_thread, 0, &server_send, &write_args);
             signal(SIGINT, cleanup);
 
-            pthread_join(read_thread, 0);
+            client_disconnect = pthread_join(read_thread, 0);
             pthread_join(write_thread, 0);
             remove_client(client_ptr->id);//remove client from the list
             close(newsockfd);

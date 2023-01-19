@@ -40,6 +40,7 @@ enum commands{
     REQ,
     REPLY,
     COMMIT,
-    RELEASE
+    RELEASE,
+    CLIENT_ADDED
 };
 
