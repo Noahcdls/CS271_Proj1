@@ -2,14 +2,23 @@ CC=gcc
 
 all: server client
 
-server: server.c
-	$(CC) -o server server.c
+server: server.o blockchain.o sha-256.o
+	$(CC) server.o blockchain.o sha-256.o -o server
 
-client: client.c
-	$(CC) -o client client.c
+client: client.o blockchain.o sha-256.o
+	$(CC) client.o blockchain.o sha-256.o -o client
 
-sha256: sha-256.c
-	$(CC) -c -o sha-256 sha-256.c
+server.o: server.c
+	$(CC) -c server.c
+
+client.o: client.c
+	$(CC) -c client.c
+
+blockchain.o: blockchain.c blockchain.h
+	$(CC) -c blockchain.c
+
+sha-256.o: sha-256.c sha-256.h
+	$(CC) -c sha-256.c
 
 hash_test: hash_test.c sha-256.o
 	$(CC) -o hash_test hash_test.c sha-256.o

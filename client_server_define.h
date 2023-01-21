@@ -9,7 +9,7 @@
 #define REQ_RCVD (1U << 1)
 #define BAL_RCVD (1U << 2)
 #define LCK_RELEASE (1U << 3)
-volatile pthread_mutex_t bank_lock, msg_lock;
+pthread_mutex_t bank_lock, msg_lock;
 volatile uint32_t client_count;
 volatile uint32_t next_id;
 static struct client* client_ids[MAX_CLIENTS];//up to 64 users

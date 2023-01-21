@@ -12,13 +12,13 @@
 #include "blockchain.h"
 
 // static pthread_t read_thread, write_thread;
-static pthread_t * read_threads[MAX_CLIENTS];
-static pthread_t * write_threads[MAX_CLIENTS];
+static pthread_t *read_threads[MAX_CLIENTS];
+static pthread_t *write_threads[MAX_CLIENTS];
 static uint8_t *tx_buffs[MAX_CLIENTS];
 static uint8_t *rx_buffs[MAX_CLIENTS];
 int client_disconnect[MAX_CLIENTS];
 struct args *read_args, *write_args;
-
+int sockfd = 0;
 struct args
 {
     int socket;
@@ -26,44 +26,18 @@ struct args
     uint32_t id;
     uint32_t loc;
 };
-/*
-@brief Initialize server by init mutexes and resetting client list and id values
-*/
-void server_init()
-{ // reset ids for clients and set starting pid value
-    pthread_mutex_init(&bank_lock, 0);
-    pthread_mutex_init(&msg_lock, 0);
-    pthread_mutex_lock(&bank_lock);
-    for (int i = 0; i < MAX_CLIENTS; i++)
-    {
-        client_ids[i] = NULL;
-        tx_buffs[i] = malloc(MAX_CLIENTS); // make malloc'd data for data buffers
-        rx_buffs[i] = malloc(MAX_CLIENTS);
-        read_threads[i] = NULL;
-        write_threads[i] = NULL;
-        client_disconnect[i] = 0;
-    }
-    next_id = 1;
-    pthread_mutex_unlock(&bank_lock);
-}
 
 /*
-@brief cancel all threads to close the forked thread
+@brief make a msg to be added onto the queue
+@param buffer the buffer you want to copy over into your message
+@param pid ID of receiving client
 */
-void cleanup()
+void *make_msg(uint8_t *buffer, uint32_t pid)
 {
-
-    for (int i = 0; i < MAX_CLIENTS; i++)
-    {
-        free(client_ids[i]); // return client ids to memory
-        free(tx_buffs[i]);   // return buffer memory
-        free(rx_buffs[i]);
-        pthread_cancel(read_threads[i]); // clean up threads
-        pthread_cancel(write_threads[i]);
-        free(write_threads[i]);
-        free(read_threads[i]);
-    }
-    exit(0);
+    struct message_queue *new_msg = malloc(sizeof(struct message_queue));
+    new_msg->id = pid;
+    memcpy(new_msg->msg, buffer, msg_size); // copy message
+    return new_msg;
 }
 
 /*
@@ -79,11 +53,14 @@ void *add_client()
         if (client_ids[i] == NULL)
         {
             struct client *new_client = malloc(sizeof(struct client)); // get a new client in memory
-            client_ids[i] = new_client;                                // add pointer to list
-            client_ids[i]->id = next_id;                               // allocate the next_id
-            client_ids[i]->balance = 10;                               // iniital value in account
+            printf("new client: %u\n", new_client);
+            client_ids[i] = new_client; // add pointer to list
+            printf("client_id: %u\n", client_ids[i]);
+            client_ids[i]->id = next_id; // allocate the next_id
+            client_ids[i]->balance = 10; // iniital value in account
             client_ids[i]->loc = i;
-            read_threads[i] = malloc(sizeof(pthread_t));//add pthread malloc
+            printf("location: %u\n", client_ids[i]->loc);
+            read_threads[i] = malloc(sizeof(pthread_t)); // add pthread malloc
             write_threads[i] = malloc(sizeof(pthread_t));
             // client_ids[i]->time = 0;     // iniital time in account
             next_id++; // increment the next available id. Goes by first come first serve on priority
@@ -109,10 +86,13 @@ void remove_client(uint32_t pid)
         if (client_ids[i]->id == pid)
         {
             free(client_ids[i]);
-            client_ids[i] = NULL;             // reset id
-            client_count--;                   // decrement active users
+            client_ids[i] = NULL; // reset id
+            client_count--;       // decrement active users
             free(read_threads[i]);
             free(write_threads[i]);
+            read_threads[i] = NULL;
+            write_threads[i] = NULL;
+            printf("Client %u removed\n", pid);
             pthread_mutex_unlock(&bank_lock); // release
             return;
         }
@@ -148,6 +128,9 @@ void msg_push(struct message_queue *msg)
 */
 void msg_pop()
 {
+    if(msg_queue == NULL){
+        return;
+    }
     pthread_mutex_lock(&msg_lock);
     struct message_queue *old_head = msg_queue; // take the old head and remove it
     msg_queue = old_head->next_msg;             // set next head
@@ -168,7 +151,7 @@ dynamically made in run time
 */
 void *server_read(void *arguments)
 {
-
+    printf("entering server read\n");
     struct args *arg = arguments;
     uint32_t newsockfd = arg->socket;
     uint8_t *buffer = arg->buffer;
@@ -188,6 +171,7 @@ void *server_read(void *arguments)
                 if (client_ids[i]->id == pid)
                 {
                     memcpy(buffer + 1, &(client_ids[i]->balance), sizeof(uint32_t));
+                    printf("Balance: %u\n", client_ids[i]->balance);
                     write(newsockfd, buffer, sizeof(uint8_t) + sizeof(uint32_t));
                     break;
                 }
@@ -197,14 +181,14 @@ void *server_read(void *arguments)
             for (int i = 0; i < MAX_CLIENTS; i++) // add req to all clients to msg queue to send out
             {
                 if (client_ids[i] != NULL)
-                {                                                                       // send messages to valid clients
-                    struct client_queue *req_msg = make_msg(buffer, client_ids[i]->id); // make a message with the buffer content
+                {                                                                        // send messages to valid clients
+                    struct message_queue *req_msg = make_msg(buffer, client_ids[i]->id); // make a message with the buffer content
                     msg_push(req_msg);
                 }
             }
             break;
         case REPLY: // add reply msg to queue after req
-            struct client_queue *reply_msg = make_msg(buffer, *((uint32_t *)(buffer + 1)));
+            struct message_queue *reply_msg = make_msg(buffer, *((uint32_t *)(buffer + 1)));
             msg_push(reply_msg);
             break;
         case RELEASE: // block chain has been accessed and can be committed as an action
@@ -212,8 +196,8 @@ void *server_read(void *arguments)
             for (int i = 0; i < MAX_CLIENTS; i++) // add req to all clients to msg queue to send out
             {
                 if (client_ids[i] != NULL)
-                {                                                                       // send messages to valid clients
-                    struct client_queue *req_msg = make_msg(buffer, client_ids[i]->id); // make a message with the buffer content
+                {                                                                        // send messages to valid clients
+                    struct message_queue *req_msg = make_msg(buffer, client_ids[i]->id); // make a message with the buffer content
                     msg_push(req_msg);
                 }
             }
@@ -239,12 +223,14 @@ void *server_read(void *arguments)
     close(newsockfd);
     remove_client(pid);
     pthread_mutex_lock(&msg_lock);
-    for(int i = 0; i < MAX_CLIENTS; i++){
-        if(client_ids[i] != NULL){//send messages to all active clients saying this client is gone
-            struct message_queue * client_msg = malloc(sizeof(struct message_queue));
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (client_ids[i] != NULL)
+        { // send messages to all active clients saying this client is gone
+            struct message_queue *client_msg = malloc(sizeof(struct message_queue));
             client_msg->id = client_ids[i]->id;
             client_msg->msg[0] = CLIENT_REMOVED;
-            memcpy(client_msg->msg+1, &pid, sizeof(uint32_t));
+            memcpy(client_msg->msg + 1, &pid, sizeof(uint32_t));
             msg_push(client_msg);
         }
     }
@@ -266,10 +252,15 @@ void *server_send(void *arguments)
     uint8_t *buffer = arg->buffer;
     uint32_t pid = arg->id;
     uint32_t loc = arg->loc;
-    while (client_disconnect[loc] != 0) // while the read thread is not exiting
-    {
+    while (client_disconnect[loc] == 0) // while the read thread is not exiting
+    {   
+        // if(msg_queue != NULL)
+        //     printf("MESSAGE ID: %u MY ID: %u\n\n", msg_queue->id, pid);
+        // else
+        //     printf("EMPTY QUEUE \n");
         if (msg_queue != NULL && (msg_queue->id == pid))
         { // look to see if a message has my client's id
+            printf("Sending a message for client %u\n", pid);
             pthread_mutex_lock(&msg_lock);
             memcpy(buffer, msg_queue->msg, msg_size); // copy over data before send
             write(newsockfd, buffer, msg_size);       // write to correct socket
@@ -282,16 +273,58 @@ void *server_send(void *arguments)
 }
 
 /*
-@brief make a msg to be added onto the queue
-@param buffer the buffer you want to copy over into your message
-@param pid ID of receiving client
+@brief Initialize server by init mutexes and resetting client list and id values
 */
-void *make_msg(uint8_t *buffer, uint32_t pid)
+void server_init()
+{ // reset ids for clients and set starting pid value
+    pthread_mutex_init(&bank_lock, 0);
+    pthread_mutex_init(&msg_lock, 0);
+    pthread_mutex_lock(&bank_lock);
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        client_ids[i] = NULL;
+        tx_buffs[i] = malloc(MAX_CLIENTS); // make malloc'd data for data buffers
+        rx_buffs[i] = malloc(MAX_CLIENTS);
+        read_threads[i] = NULL;
+        write_threads[i] = NULL;
+        client_disconnect[i] = 0;
+    }
+    next_id = 1;
+    read_args = malloc(sizeof(struct args));
+    write_args = malloc(sizeof(struct args));
+    pthread_mutex_unlock(&bank_lock);
+}
+
+/*
+@brief cancel all threads to close the forked thread
+*/
+void cleanup()
 {
-    struct message_queue *new_msg = malloc(sizeof(struct message_queue));
-    new_msg->id = pid;
-    memcpy(new_msg->msg, buffer, msg_size); // copy message
-    return new_msg;
+
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (client_ids[i] != NULL)
+            free(client_ids[i]); // return client ids to memory
+        free(tx_buffs[i]);       // return buffer memory
+        free(rx_buffs[i]);
+
+        if (write_threads[i] != NULL)
+        {
+            pthread_cancel(*write_threads[i]);
+            free(write_threads[i]);
+        }
+        if (read_threads[i] != NULL)
+        {
+            pthread_cancel(*read_threads[i]);
+            free(read_threads[i]);
+        }
+    }
+    while (msg_queue != NULL)
+        msg_pop();
+    free(write_args);
+    free(read_args);
+    close(sockfd);
+    exit(0);
 }
 
 void error(const char *msg)
@@ -302,7 +335,8 @@ void error(const char *msg)
 
 int main(int argc, char *argv[])
 {
-    int sockfd, newsockfd, portno;
+    server_init();
+    int newsockfd, portno;
     socklen_t clilen;
     struct sockaddr_in serv_addr, cli_addr;
     int n;
@@ -322,7 +356,7 @@ int main(int argc, char *argv[])
     if (bind(sockfd, (struct sockaddr *)&serv_addr,
              sizeof(serv_addr)) < 0)
         error("ERROR on binding");
-    listen(sockfd, MAX_CLIENTS);//listen up to 64 Clients
+    listen(sockfd, MAX_CLIENTS); // listen up to 64 Clients
     clilen = sizeof(cli_addr);
     int pid;
     signal(SIGINT, cleanup);
@@ -335,17 +369,22 @@ int main(int argc, char *argv[])
             error("ERROR on accept");
         pthread_mutex_lock(&bank_lock);
         client_count++; // increment number of clients available
+        printf("Client is connecting\n");
         pthread_mutex_unlock(&bank_lock);
         // child process runs forever sending messages
         // close(sockfd); // close old socket since this forked process doesnt need it
         uint8_t rx_buff[msg_size], tx_buff[msg_size];
-        struct client *client_ptr = add_client();//add the client to the network
-        if(client_ptr == NULL) continue;
+        struct client *client_ptr = add_client(); // add the client to the network
+        printf("Made client data\n");
+        if (client_ptr == NULL)
+            continue;
         memcpy(tx_buff, client_ptr, sizeof(struct client)); // send the connected client his PID and initial balance
-        n = write(newsockfd, tx_buff, msg_size);//write back its information so it can tell who it is
+        printf("Sending client data to client\n");
+        n = write(newsockfd, tx_buff, msg_size); // write back its information so it can tell who it is
+        printf("Client received data: %u\n", client_ptr->loc);
 
-        read_args->buffer = tx_buff;//write arguments for the threads
-        write_args->buffer = rx_buff;
+        read_args->buffer = tx_buffs[client_ptr->loc]; // write arguments for the threads
+        write_args->buffer = rx_buffs[client_ptr->loc];
 
         read_args->id = client_ptr->id;
         write_args->id = client_ptr->id;
@@ -355,18 +394,24 @@ int main(int argc, char *argv[])
 
         read_args->loc = client_ptr->loc;
         write_args->loc = client_ptr->loc;
-
-        pthread_create(read_threads[client_ptr->loc], 0, &server_read, read_args);//run threads and then listen for another client again
+        printf("client loc: %u\n", client_ptr->loc);
+        pthread_create(read_threads[client_ptr->loc], 0, &server_read, read_args); // run threads and then listen for another client again
+        printf("Read thread started\n");
         pthread_create(write_threads[client_ptr->loc], 0, &server_send, write_args);
-        for(int i = 0; i < MAX_CLIENTS; i++){
-            if(client_ids[i] != NULL){//broadcast a new client has joined the server
-                struct message_queue * client_msg = malloc(sizeof(struct message_queue));
+        printf("Created listen and read threads\n");
+        for (int i = 0; i < MAX_CLIENTS; i++)
+        {
+            if (client_ids[i] != NULL)
+            { // broadcast a new client has joined the server
+                printf("making a message for client %u\n", client_ids[i]->id);
+                struct message_queue *client_msg = malloc(sizeof(struct message_queue));
                 client_msg->id = client_ids[i]->id;
                 client_msg->msg[0] = CLIENT_ADDED;
-                memcpy(client_msg->msg+1, &(client_ptr->id), sizeof(uint32_t));
-                msg_push(client_msg);              
+                memcpy(client_msg->msg + 1, &(client_ptr->id), sizeof(uint32_t));
+                msg_push(client_msg);
             }
         }
+        printf("Pushed client added to clients\n");
     }
     close(sockfd);
     return 0;

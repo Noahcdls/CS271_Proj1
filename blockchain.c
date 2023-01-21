@@ -1,4 +1,5 @@
 #include "blockchain.h"
+#include "sha-256.h"
 /*
  * @brief Append a block in the block chain to another block
  * @param insert the block you want to insert
