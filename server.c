@@ -283,8 +283,8 @@ void server_init()
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
         client_ids[i] = NULL;
-        tx_buffs[i] = malloc(MAX_CLIENTS); // make malloc'd data for data buffers
-        rx_buffs[i] = malloc(MAX_CLIENTS);
+        tx_buffs[i] = malloc(msg_size); // make malloc'd data for data buffers
+        rx_buffs[i] = malloc(msg_size);
         read_threads[i] = NULL;
         write_threads[i] = NULL;
         client_disconnect[i] = 0;
@@ -300,30 +300,34 @@ void server_init()
 */
 void cleanup()
 {
-
+    close(sockfd);
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        if (client_ids[i] != NULL)
-            free(client_ids[i]); // return client ids to memory
+        if (client_ids[i] != NULL){
+            printf("freed ID\n");
+            free(client_ids[i]); }// return client ids to memory}
+        printf("freeing buffers\n");
         free(tx_buffs[i]);       // return buffer memory
         free(rx_buffs[i]);
 
         if (write_threads[i] != NULL)
         {
+            printf("freeing write thread\n");
             pthread_cancel(*write_threads[i]);
             free(write_threads[i]);
         }
         if (read_threads[i] != NULL)
         {
+            printf("freeing read thread\n");
             pthread_cancel(*read_threads[i]);
             free(read_threads[i]);
         }
     }
-    while (msg_queue != NULL)
-        msg_pop();
+    // while (msg_queue != NULL)
+    //     msg_pop();
+    printf("freeing args\n");
     free(write_args);
     free(read_args);
-    close(sockfd);
     exit(0);
 }
 

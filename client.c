@@ -36,6 +36,8 @@ Cancels threads and cleans up blockchain
 */
 void cleanup()
 {
+    close(sockfd);
+    printf("cleaning up");
     pthread_cancel(listening_thread);
     pthread_cancel(sending_thread);
     struct blockchain *block_ptr = block_chain;
@@ -398,6 +400,17 @@ void *client_read(void *socket_fd)
             }
         }
     }
+    printf("Exiting\n");
+    pthread_cancel(sending_thread);
+    struct blockchain *block_ptr = block_chain;
+    while (block_ptr != NULL)
+    {
+        struct blockchain *next_ptr = block_ptr->prev; // get next one
+        free(block_ptr);                               // free the malloc'd data
+        block_ptr = next_ptr;                          // go to next pointer
+    }
+    close(sockfd);
+    exit(0);
     return NULL;
 }
 
