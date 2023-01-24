@@ -459,6 +459,7 @@ void *client_read(void *socket_fd)
 void *client_send(void *socket_fd)
 {
     uint32_t socket = *((int *)socket_fd);
+    printf("INITIAL BALANCE: 10\n");
     while (1)
     {
         printf("WELCOME CLIENT %u\n", pid); // AVAILABLE COMMANDS:\n1. BALANCE\n2. SEND\n3. PRINT BLOCKCHAIN", pid);
@@ -539,7 +540,7 @@ void *client_send(void *socket_fd)
             printf("TRANSACTION COMPLETE\n\n");
             break;
         case 3:
-            printf("CLOCK TIME: %u\n", lamp_clock);
+            printf("CLOCK TIME: %u\n\n", lamp_clock);
             lamp_clock++;
             struct blockchain *cur_blk = block_chain;
             while (cur_blk != NULL)
@@ -552,6 +553,11 @@ void *client_send(void *socket_fd)
                        cur_blk->status == IN_PROG   ? "IN PROG"
                        : cur_blk->status == SUCCESS ? "SUCCESS"
                                                     : "ABORT");
+                printf("HASH: ");
+                for(int i = 0; i < 32; i++){
+                    printf("%x", cur_blk->prev_hash[i]);
+                }
+                printf("\n\n");
                 cur_blk = cur_blk->prev;
             }
             printf("\n\n");
