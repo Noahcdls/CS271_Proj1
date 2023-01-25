@@ -27,6 +27,12 @@ struct args
     uint32_t id;
     uint32_t loc;
 };
+struct bank_history{
+    struct block trans;
+    uint8_t status;
+    struct bank_history * prev;
+};
+struct bank_history * newest_trans;
 
 /*
 @brief make a msg to be added onto the queue
@@ -182,7 +188,7 @@ void *server_read(void *arguments)
                 if (client_ids[i]->id == pid)
                 {
                     memcpy(buffer + 1, &(client_ids[i]->balance), sizeof(uint32_t));
-                    printf("Client %u Balance: %u\n", pid, client_ids[i]->balance);
+                    printf("CLIENT %u BALANCE: $%u\n", pid, client_ids[i]->balance);
                     write(newsockfd, buffer, sizeof(uint8_t) + sizeof(uint32_t));
                     break;
                 }
@@ -214,7 +220,18 @@ void *server_read(void *arguments)
             }
             break;
         case COMMIT: // commit a transaction to the bank
+            pthread_mutex_lock(&bank_lock);
             struct blockchain *commit_chain = (struct blockchain *)(buffer + 1);
+            struct bank_history * new_block = malloc(sizeof(struct bank_history));
+            memcpy(&(new_block->trans), &(commit_chain->transaction), sizeof(struct block));
+            new_block->prev = newest_trans;
+            new_block->status = commit_chain->status;
+            newest_trans = new_block;
+            pthread_mutex_unlock(&bank_lock);
+            if(new_block->status == FAILED){
+                break;
+            }
+            else{
             for (int i = 0; i < MAX_CLIENTS; i++)
             {
                 if (client_ids[i] != NULL)
@@ -224,6 +241,7 @@ void *server_read(void *arguments)
                     if (client_ids[i]->id == commit_chain->transaction.recvr)
                         client_ids[i]->balance += commit_chain->transaction.amount;
                 }
+            }
             }
             break;
         default: // do nothing
@@ -323,7 +341,7 @@ void *server_interface(void *arguments)
 {
     while (1)
     {
-        printf("WELCOME TO BANK INTERFACE\nPLEASE PRESS 1 TO GET ALL BALANCES\n\n");
+        printf("WELCOME TO BANK INTERFACE\nPLEASE PRESS 1 TO GET ALL BALANCES\nPRESS 2 FOR BANK HISTORY\n\n");
         uint8_t interface_buff[32];
         fgets(interface_buff, 32, stdin);
         int value = atoi(interface_buff);
@@ -332,8 +350,21 @@ void *server_interface(void *arguments)
             for (int i = 0; i < MAX_CLIENTS; i++)
             {
                 if (client_ids[i] != NULL)
-                    printf("CLIENT %u\tBALANCE: %u\n", client_ids[i]->id, client_ids[i]->balance);
+                    printf("CLIENT %u\tBALANCE: $%u\n", client_ids[i]->id, client_ids[i]->balance);
             }
+            printf("\n");
+        }
+        else if(value == 2){
+            struct bank_history * hist = newest_trans;
+            pthread_mutex_lock(&bank_lock);
+            printf("\n");
+            while(hist != NULL){
+                printf("SENDER:%u RECEIVER:%u AMOUNT:%u TIME:%u STATUS:%s\n",
+                hist->trans.sender, hist->trans.recvr, hist->trans.amount, hist->trans.lampstamp.time,
+                hist->status == FAILED ? "FAILED" : hist->status == SUCCESS ? "SUCCESS" : "IN PROGRESS");
+                hist = hist->prev;
+            }
+            pthread_mutex_unlock(&bank_lock);
             printf("\n");
         }
     }
@@ -344,6 +375,7 @@ void *server_interface(void *arguments)
 */
 void server_init()
 { // reset ids for clients and set starting pid value
+    newest_trans = NULL;
     pthread_mutex_init(&bank_lock, 0);
     pthread_mutex_init(&msg_lock, 0);
     pthread_mutex_lock(&bank_lock);
@@ -369,6 +401,12 @@ void cleanup()
 {
     pthread_cancel(server_int);
     close(sockfd);
+    struct bank_history * hist = newest_trans;
+    while(hist != NULL){
+        struct bank_history* tmp_hist = hist->prev;
+        free(hist);
+        hist = tmp_hist;
+    }
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
         if (client_ids[i] != NULL)

@@ -348,6 +348,8 @@ void pop_queue()
 */
 uint32_t check_valid_client(uint32_t client_id)
 {
+    if(client_id == 0)
+        return 0;
     for (int i = 0; i < MAX_CLIENTS; i++)
         if (client_id == active_clients[i])
             return 1;
@@ -377,7 +379,7 @@ void *client_read(void *socket_fd)
             break;
         case BALANCE:                                                             // response from bank to update the local balance so we can pick an amount to request
             memcpy(&my_balance, ((uint32_t *)(rx_buffer + 1)), sizeof(uint32_t)); // copy over balance
-            printf("BALANCE RECEIVED: %u\n", my_balance);
+            printf("BALANCE RECEIVED: $%u\n", my_balance);
             client_flags |= BAL_RCVD; // flag sender that we have received bank balance and updated our local knowledge of the value
             break;
         case REQ:                                            // received a request to send
@@ -390,19 +392,19 @@ void *client_read(void *socket_fd)
             add_blockchain(req_chain); // add it to our list. This will overwrite the prev ptr so it will be completely local after this
             rx_buffer[0] = REPLY;
             memcpy((uint32_t *)(rx_buffer + 1), &(req_chain->transaction.sender), sizeof(uint32_t));
-            // sleep(3); // sleep two seconds before we send the message back for msg passing delay
-            //  sleep will also help if we recieve another request from someone
+            memcpy((uint32_t *)(rx_buffer + 5), &(pid), sizeof(uint32_t));
             write(socket, rx_buffer, msg_size); // send off the reply right away. No need to use write thread
             lamp_clock = (lamp_clock > req_chain->transaction.lampstamp.time) ? lamp_clock + 1 : req_chain->transaction.lampstamp.time + 1;
             printf("CLOCK UPDATED TO: %u\n", lamp_clock);
             break;
         case REPLY:
             reply_count++; // increase our reply count
-            // printf("RECEIVED REPLY FROM CLIENT %u\n", *((uint32_t *)(rx_buffer + 1)));
+            printf("RECEIVED REPLY FROM CLIENT %u\n", *((uint32_t *)(rx_buffer + 5)));
             if (reply_count == counted_clients)
             {                             // if we recieved the amount of messages we anticipated, flag
                 client_flags |= REP_RCVD; // flag sender that we have received all replies
                 printf("ALL REPLIES RECEIVED\n");
+                reply_count = 0;
             }
             break;
         case RELEASE:
@@ -459,7 +461,7 @@ void *client_read(void *socket_fd)
 void *client_send(void *socket_fd)
 {
     uint32_t socket = *((int *)socket_fd);
-    printf("INITIAL BALANCE: 10\n");
+    printf("INITIAL BALANCE: $10\n");
     while (1)
     {
         printf("WELCOME CLIENT %u\n", pid); // AVAILABLE COMMANDS:\n1. BALANCE\n2. SEND\n3. PRINT BLOCKCHAIN", pid);
@@ -477,7 +479,7 @@ void *client_send(void *socket_fd)
             write(socket, tx_buffer, msg_size);
             while (client_flags & BAL_RCVD != BAL_RCVD)
                 ; // wait for flag saying the balance has been received
-            printf("MY BALANCE IS %u\n\n", my_balance);
+            printf("MY BALANCE IS $%u\n\n", my_balance);
             client_flags &= ~BAL_RCVD; // clear balance receive flag
             break;
         case 2:
@@ -501,7 +503,6 @@ void *client_send(void *socket_fd)
             counted_clients = client_count; // the scenario we will build is not quickly adding or removing clients so no need to lock
             client_flags &= ~REP_RCVD;      // clear reply flags
             sleep(2);                       // delay for other clients to send
-            // printf("WRITE TO SOCKET\n");
             write(socket, tx_buffer, msg_size); // send out req
             printf("WAITING FOR REPLIES FROM %u CLIENTS\n", counted_clients);
             while (!(client_flags)&REP_RCVD)
@@ -516,17 +517,23 @@ void *client_send(void *socket_fd)
             while (!(client_flags & BAL_RCVD))
                 ;
             client_flags &= ~BAL_RCVD;
-            printf("MY BALANCE BEFORE TRANSACTION IS %u\n", my_balance);
+            printf("MY BALANCE BEFORE TRANSACTION IS $%u\n", my_balance);
             if (my_balance < trans_amount)
             {
+                tx_buffer[0] = COMMIT;
+                next_block->status = FAILED;
+                memcpy(tx_buffer + 1, next_block, sizeof(struct blockchain));
+                write(socket, tx_buffer, msg_size);                
                 tx_buffer[0] = RELEASE;
                 tx_buffer[1] = FAILED;
                 block_finished(FAILED);
                 write(socket, tx_buffer, msg_size);
+                printf("TRANSACTION FAILED\n");
             }
             else
             {
                 tx_buffer[0] = COMMIT;
+                next_block->status = SUCCESS;
                 memcpy(tx_buffer + 1, next_block, sizeof(struct blockchain));
                 write(socket, tx_buffer, msg_size);
                 block_finished(SUCCESS);
@@ -534,10 +541,11 @@ void *client_send(void *socket_fd)
                 tx_buffer[1] = SUCCESS;
                 write(socket, tx_buffer, msg_size);
                 my_balance -= trans_amount;
+                printf("TRANSACTION SUCCESSFUL\n");
             }
             // pthread_mutex_unlock(&bank_lock);
-            printf("MY BALANCE AFTER TRANSACTION IS %u\n", my_balance);
-            printf("TRANSACTION COMPLETE\n\n");
+            printf("MY BALANCE AFTER TRANSACTION IS $%u\n\n", my_balance);
+            // printf("TRANSACTION COMPLETE\n\n");
             break;
         case 3:
             printf("CLOCK TIME: %u\n\n", lamp_clock);
@@ -555,7 +563,7 @@ void *client_send(void *socket_fd)
                                                     : "ABORT");
                 printf("HASH: ");
                 for(int i = 0; i < 32; i++){
-                    printf("%x", cur_blk->prev_hash[i]);
+                    printf("%02x", cur_blk->prev_hash[i]);
                 }
                 printf("\n\n");
                 cur_blk = cur_blk->prev;
