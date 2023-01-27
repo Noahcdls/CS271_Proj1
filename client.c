@@ -306,6 +306,7 @@ void *make_blockchain(uint32_t amount, uint32_t my_id, uint32_t recv_id)
     new_block->transaction.lampstamp.time = lamp_clock;
     printf("TIME OF NEW BLOCK: %u\n", lamp_clock);
     lamp_clock++;
+    printf("CLOCK UPDATED TO: %u\n", lamp_clock);
     return new_block;
 }
 
@@ -378,9 +379,11 @@ void *client_read(void *socket_fd)
             printf("TRANSACTION ABORTED\n");
             break;
         case BALANCE:                                                             // response from bank to update the local balance so we can pick an amount to request
-            memcpy(&my_balance, ((uint32_t *)(rx_buffer + 1)), sizeof(uint32_t)); // copy over balance
+            pthread_mutex_lock(&blockchain_lock);
+            int* works = memcpy(&my_balance, ((uint32_t *)(rx_buffer + 1)), sizeof(uint32_t)); // copy over balance
             printf("BALANCE RECEIVED: $%u\n", my_balance);
             client_flags |= BAL_RCVD; // flag sender that we have received bank balance and updated our local knowledge of the value
+            pthread_mutex_unlock(&blockchain_lock);
             break;
         case REQ:                                            // received a request to send
             struct blockchain *req_chain = new_blockchain(); // make a new blockchain member
@@ -394,7 +397,7 @@ void *client_read(void *socket_fd)
             memcpy((uint32_t *)(rx_buffer + 1), &(req_chain->transaction.sender), sizeof(uint32_t));
             memcpy((uint32_t *)(rx_buffer + 5), &(pid), sizeof(uint32_t));
             write(socket, rx_buffer, msg_size); // send off the reply right away. No need to use write thread
-            lamp_clock = (lamp_clock > req_chain->transaction.lampstamp.time) ? lamp_clock + 1 : req_chain->transaction.lampstamp.time + 1;
+            lamp_clock = (lamp_clock > req_chain->transaction.lampstamp.time) ? (lamp_clock + 1) : (req_chain->transaction.lampstamp.time + 1);
             printf("CLOCK UPDATED TO: %u\n", lamp_clock);
             break;
         case REPLY:
@@ -403,7 +406,6 @@ void *client_read(void *socket_fd)
             if (reply_count == counted_clients)
             {                             // if we recieved the amount of messages we anticipated, flag
                 client_flags |= REP_RCVD; // flag sender that we have received all replies
-                printf("ALL REPLIES RECEIVED\n");
                 reply_count = 0;
             }
             break;
@@ -474,13 +476,16 @@ void *client_send(void *socket_fd)
         case 1:
             printf("CLOCK TIME: %u\n", lamp_clock);
             lamp_clock++;
+            printf("CLOCK UPDATED TO: %u\n", lamp_clock);
             tx_buffer[0] = BALANCE;
             client_flags &= ~BAL_RCVD;
             write(socket, tx_buffer, msg_size);
-            while (client_flags & BAL_RCVD != BAL_RCVD)
+            while ((client_flags & BAL_RCVD) != BAL_RCVD)
                 ; // wait for flag saying the balance has been received
+            pthread_mutex_lock(&bank_lock);
             printf("MY BALANCE IS $%u\n\n", my_balance);
             client_flags &= ~BAL_RCVD; // clear balance receive flag
+            pthread_mutex_unlock(&bank_lock);
             break;
         case 2:
             printf("WHO DO YOU WANT TO SEND TO?\n"); // start SEND process
@@ -501,6 +506,7 @@ void *client_send(void *socket_fd)
             tx_buffer[0] = REQ; // send out a request
             memcpy((struct blockchain *)(tx_buffer + 1), new_trans, sizeof(struct blockchain));
             counted_clients = client_count; // the scenario we will build is not quickly adding or removing clients so no need to lock
+            reply_count = 0;
             client_flags &= ~REP_RCVD;      // clear reply flags
             sleep(2);                       // delay for other clients to send
             write(socket, tx_buffer, msg_size); // send out req
@@ -508,6 +514,7 @@ void *client_send(void *socket_fd)
             while (!(client_flags)&REP_RCVD)
                 ;     // wait until all replies are received
             sleep(3); // wait a few seconds after recieve to simulate delay
+            printf("ALL REPLIES RECEIVED\n");
             while (next_block->transaction.lampstamp.client != pid)
                 ;
             // pthread_mutex(&bank_lock);
@@ -548,8 +555,9 @@ void *client_send(void *socket_fd)
             // printf("TRANSACTION COMPLETE\n\n");
             break;
         case 3:
-            printf("CLOCK TIME: %u\n\n", lamp_clock);
+            printf("CLOCK TIME: %u\n", lamp_clock);
             lamp_clock++;
+            printf("CLOCK UPDATED TO: %u\n\n", lamp_clock);
             struct blockchain *cur_blk = block_chain;
             while (cur_blk != NULL)
             {
@@ -573,8 +581,8 @@ void *client_send(void *socket_fd)
         case 4:
             printf("CLOCK TIME: %u\n", lamp_clock);
             lamp_clock++;
+            printf("CLOCK UPDATED TO: %u\n", lamp_clock);
             printf("ACTIVE CLIENTS:\n");
-            lamp_clock++;
             for (int i = 0; i < MAX_CLIENTS; i++)
                 if (active_clients[i] != 0)
                     printf("CLIENT %u\n", active_clients[i]);
