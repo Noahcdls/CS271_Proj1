@@ -10,8 +10,9 @@
 #include <signal.h>
 #include "client_server_define.h"
 #include "blockchain.h"
-
+#include <arpa/inet.h>
 // static pthread_t read_thread, write_thread;
+static int port_counter;
 static pthread_t *read_threads[MAX_CLIENTS];
 static pthread_t *write_threads[MAX_CLIENTS];
 static pthread_t server_int;
@@ -67,6 +68,12 @@ void *add_client()
             client_ids[i]->balance = 10; // iniital value in account
             client_ids[i]->loc = i;
             //printf("location: %u\n", client_ids[i]->loc);
+            if(read_threads[i] != NULL){
+                free(read_threads[i]);
+            }
+            if(write_threads[i] != NULL){
+                free(write_threads[i]);
+            }
             read_threads[i] = malloc(sizeof(pthread_t)); // add pthread malloc
             write_threads[i] = malloc(sizeof(pthread_t));
             // client_ids[i]->time = 0;     // iniital time in account
@@ -90,7 +97,7 @@ void remove_client(uint32_t pid)
     pthread_mutex_lock(&bank_lock); // can only remove someone to the server if no one has the lock to prevent issues
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
-        if (client_ids[i]->id == pid)
+        if (client_ids[i] != NULL && client_ids[i]->id == pid)
         {
             printf("CLEANING CLIENT FOR REUSE\n");
             free(client_ids[i]);
@@ -100,7 +107,7 @@ void remove_client(uint32_t pid)
             free(write_threads[i]);
             read_threads[i] = NULL;
             write_threads[i] = NULL;
-            printf("Client %u removed\n", pid);
+            printf("CLIENT %u REMOVED\n", pid);
             pthread_mutex_unlock(&bank_lock); // release
             return;
         }
@@ -134,7 +141,7 @@ void msg_push(struct message_queue *msg)
 }
 
 /*
-@brief Pop a message on the msg queue
+@brief Pop a message on the msg
 */
 void msg_pop()
 {
@@ -178,15 +185,18 @@ void *server_read(void *arguments)
     {
 
         int msg = read(newsockfd, buffer, msg_size);
+        printf("GOT A MESSAGE %u\n", *buffer);
         if (msg == 0)
             break;
         switch (*buffer)
         {
         case BALANCE: // send balance back to client. Sent back right away
+            printf("ENTERING BALANCE\n");
             for (int i = 0; i < MAX_CLIENTS; i++)
             {
-                if (client_ids[i]->id == pid)
+                if (client_ids[i] != NULL && client_ids[i]->id == pid)
                 {
+                    printf("SENDING BALANCE\n");
                     memcpy(buffer + 1, &(client_ids[i]->balance), sizeof(uint32_t));
                     printf("CLIENT %u BALANCE: $%u\n", pid, client_ids[i]->balance);
                     write(newsockfd, buffer, sizeof(uint8_t) + sizeof(uint32_t));
@@ -331,6 +341,7 @@ void *server_send(void *arguments)
     printf("CLIENT %u dropped\n", pid);
     client_disconnect[loc] = 0;
     remove_client(pid);
+    printf("EXITING\n");
     return NULL;
 }
 
@@ -462,6 +473,7 @@ int main(int argc, char *argv[])
         error("ERROR opening socket");
     bzero((char *)&serv_addr, sizeof(serv_addr));
     portno = atoi(argv[1]);
+    port_counter = portno;
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = INADDR_ANY;
     serv_addr.sin_port = htons(portno);
@@ -478,6 +490,13 @@ int main(int argc, char *argv[])
         newsockfd = accept(sockfd,
                            (struct sockaddr *)&cli_addr,
                            &clilen); // accept a connection
+        struct sockaddr_in* pV4Addr = (struct sockaddr_in*)&cli_addr;//Extract client IP
+        struct in_addr ipAddr = pV4Addr->sin_addr;
+        char str[INET_ADDRSTRLEN];
+        inet_ntop( AF_INET, &ipAddr, str, INET_ADDRSTRLEN );
+
+        printf("Client IP: %s\n", str);
+
         if (newsockfd < 0)
             error("ERROR on accept");
         pthread_mutex_lock(&bank_lock);
@@ -488,6 +507,7 @@ int main(int argc, char *argv[])
         // close(sockfd); // close old socket since this forked process doesnt need it
         uint8_t rx_buff[msg_size], tx_buff[msg_size];
         struct client *client_ptr = add_client(); // add the client to the network
+        memcpy(client_ptr->ip_addr, str, sizeof(str));//write in IP ADDR
         printf("MADE CLIENT DATA\n");
         if (client_ptr == NULL)
             continue;
@@ -495,6 +515,13 @@ int main(int argc, char *argv[])
         //printf("Sending client data to client\n");
         n = write(newsockfd, tx_buff, msg_size); // write back its information so it can tell who it is
         //printf("Client received data: %u\n", client_ptr->loc);
+        port_counter++;
+        memcpy(tx_buff, &port_counter, sizeof(int));
+        n = write(newsockfd, tx_buff, msg_size);
+        n = read(newsockfd, tx_buff, msg_size);
+        memcpy(&port_counter, tx_buff, sizeof(int));
+        printf("UPDATED PORT COUNTER TO %d\n", port_counter);
+        client_ptr->port_no = port_counter;//write port
 
         read_args->buffer = tx_buffs[client_ptr->loc]; // write arguments for the threads
         write_args->buffer = rx_buffs[client_ptr->loc];
@@ -516,21 +543,26 @@ int main(int argc, char *argv[])
         {
             if (client_ids[i] != NULL && client_ids[i]->id != client_ptr->id)
             {
-                // broadcast a new client has joined the server
-                // do not send to new client so he wont send to himself
+                // broadcast that a new client has joined the server
+                // do not send to th new client so he doesnt duplicate his info
                 //printf("BROADCASTING NEW CLIENT TO CLIENT %u\n", client_ids[i]->id);
                 struct message_queue *client_msg = malloc(sizeof(struct message_queue));
                 client_msg->id = client_ids[i]->id; // send to other client
                 client_msg->msg[0] = CLIENT_ADDED;
                 memcpy(client_msg->msg + 1, &(client_ptr->id), sizeof(uint32_t)); // add id of new client
+                printf("PORT OF ACTIVE %u\n", client_ids[i]->port_no);
+                memcpy((int*)(client_msg->msg + 5), &(client_ptr->port_no), sizeof(int));//send the port the new client is connected to
+                memcpy(client_msg->msg+9, str, sizeof(str));//send over his IP
                 msg_push(client_msg);
-
-                // send new client data for who else is connected
+                sleep(1);
+                // send the new client the information on who else is connected
                 //printf("SENDING NEW CLIENT ACTIVE LIST\n");
                 struct message_queue *client_data = malloc(sizeof(struct message_queue));
                 client_data->id = client_ptr->id; // send to new client
-                client_data->msg[0] = CLIENT_ADDED;
+                client_data->msg[0] = CLIENT_CONNECT;
                 memcpy((uint32_t *)(client_data->msg + 1), &(client_ids[i]->id), sizeof(uint32_t)); // add id of online client
+                memcpy((int*)(client_data->msg + 5), &(client_ids[i]->port_no), sizeof(int));
+                memcpy(client_data->msg+9, client_ids[i]->ip_addr, sizeof(client_ids[i]->ip_addr));
                 msg_push(client_data);
             }
         }

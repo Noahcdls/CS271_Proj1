@@ -9,6 +9,7 @@
         "client_server_define.h": "c",
         "types.h": "c",
         "stdio.h": "c",
-        "netdb.h": "c"
+        "netdb.h": "c",
+        "stdint-uintn.h": "c"
     }
 }

@@ -9,9 +9,11 @@
 #include "client_server_define.h"
 #include "blockchain.h"
 #include <signal.h>
-
+#include <arpa/inet.h>
 uint8_t client_flags;
 uint8_t rx_buffer[msg_size], tx_buffer[msg_size];
+static uint8_t *tx_buffs[MAX_CLIENTS];
+static uint8_t *rx_buffs[MAX_CLIENTS];
 static uint32_t my_balance;
 static uint32_t counted_clients;
 static uint32_t pid;
@@ -20,17 +22,26 @@ struct blockchain *block_chain;       // my copy of the blockchain. Acts as the 
 struct blockchain *next_block;        // next block to be committed
 struct blockchain *rec_finished;      // last block that was committed. Can be head if nothing queued to be committed
 uint32_t active_clients[MAX_CLIENTS]; // holds pids of active clients
+int writer_socket_no[MAX_CLIENTS];
 static pthread_mutex_t blockchain_lock;
-
-int lamp_clock = 0, sockfd = 0, reply_count = 0;
+static pthread_t *read_threads[MAX_CLIENTS];
+static pthread_t *write_threads[MAX_CLIENTS];
+int lamp_clock = 0, sockfd = 0, reply_count = 0, newsock = 0;
 pthread_t listening_thread, sending_thread;
-
+int my_connect_socket, my_port, client_socket;
+socklen_t clilength;
+struct sockaddr_in my_addr, clients_addr;
 void error(const char *msg)
 {
     perror(msg);
     exit(0);
 }
-
+struct args{
+    int socket;
+    uint8_t* buffer;
+    uint32_t others_id;
+};
+struct args client_args;
 /*
 @brief clean up of file upon SIGKILL.
 Cancels threads and cleans up blockchain
@@ -41,6 +52,19 @@ void cleanup()
     printf("CLEANING UP\n");
     pthread_cancel(listening_thread);
     pthread_cancel(sending_thread);
+    for(int i = 0; i < MAX_CLIENTS; i++){
+        
+        if(read_threads[i] != NULL){
+            pthread_cancel(*read_threads[i]);
+            free(read_threads[i]);
+            
+            }
+        free(tx_buffs[i]);
+        free(rx_buffs[i]);
+        if(active_clients[i] != 0){
+            close(writer_socket_no[i]);
+        }
+    }
     struct blockchain *block_ptr = block_chain;
     while (block_ptr != NULL)
     {
@@ -51,73 +75,6 @@ void cleanup()
     exit(0);
 }
 
-/*
-@brief A priority queue to add clients who are requesting transactions to occur
-in the bank
-@param req_client a pointer to the client we want to add.
-@note DEPRECATED
-*/
-/*
-void add_client_to_queue(struct client *req_client) // priority queue for adding clients to local queue
-{
-    if (req_client == NULL)
-        return;
-    struct client_queue *nextQueue = malloc(sizeof(struct client_queue));
-    nextQueue->curr_client = req_client;
-    nextQueue->next_client = NULL;
-    nextQueue->prev_client = NULL;
-
-    struct client_queue *cmpr_client = queue;
-
-    if (queue == NULL)
-    {
-        queue = nextQueue;
-        return;
-    }
-
-    while (1)
-    {
-        if (req_client->time > cmpr_client->curr_client->time) // request occurs after cmpr
-        {
-            if (cmpr_client->next_client == NULL) // add if we have reached end of queue
-            {
-                cmpr_client->next_client = nextQueue;
-                nextQueue->prev_client = cmpr_client;
-                return;
-            }
-        }
-        else if (req_client->time == cmpr_client->curr_client->time) // req and cmpr share time. check id
-        {
-            if (req_client->id < cmpr_client->curr_client->id) // only add if id is less/higher priority
-            {
-                nextQueue->prev_client = cmpr_client->prev_client;   // update next client ahead of nextQueue
-                if (nextQueue->prev_client != NULL)                  // only change if prev actually exists
-                    nextQueue->prev_client->next_client = nextQueue; // update client ahead to know nextQueue is next
-                nextQueue->next_client = cmpr_client;                // next client after nextQueue is the comparison
-                cmpr_client->prev_client = nextQueue;                // client ahead of comparison is nextQueue
-                if (cmpr_client == queue)                            // add to head if replaced
-                    queue = nextQueue;
-                return;
-            }
-        }
-        else if (req_client->time < cmpr_client->curr_client->time) // req occurs before cmpr. add into list
-        {
-            nextQueue->prev_client = cmpr_client->prev_client;   // update next client ahead of nextQueue
-            if (nextQueue->prev_client != NULL)                  // only change if prev actually exists
-                nextQueue->prev_client->next_client = nextQueue; // update client ahead to know nextQueue is next
-            nextQueue->next_client = cmpr_client;                // next client after nextQueue is the comparison
-            cmpr_client->prev_client = nextQueue;                // client ahead of comparison is nextQueue
-            if (cmpr_client == queue)                            // add to head if replaced
-                queue = nextQueue;
-            return;
-        }
-        else
-        {
-            cmpr_client = cmpr_client->next_client; // go to next client in queue
-        }
-    }
-}
-*/
 /*
 @brief recompute hash of all items active in queue
 @note All committed blocks do not have to be recomputed
@@ -135,9 +92,11 @@ void recompute_hash()
                 cur_blk = cur_blk->prev;
                 continue;
             }
-            if(cur_blk->prev != NULL){
+            if (cur_blk->prev != NULL)
+            {
                 // printf("PERFORMING SHA\n");
-                calc_sha_256(cur_blk->prev_hash, cur_blk->prev, sizeof(struct blockchain));}
+                calc_sha_256(cur_blk->prev_hash, cur_blk->prev, sizeof(struct blockchain));
+            }
             // printf("finished one calc\n");
             cur_blk = cur_blk->prev;
         }
@@ -326,22 +285,6 @@ void copy_blockchain(struct blockchain *src_chain, struct blockchain *dest_chain
     memcpy(dest_chain, src_chain, sizeof(struct blockchain));
 }
 
-/*
-@brief pops head of the client queue
-@note DEPRECATED
-*/
-/*
-void pop_queue()
-{
-    if (queue == NULL)
-        return;
-    queue->next_client->prev_client = NULL;
-    struct client_queue *old_head = queue;
-    queue = queue->next_client;
-    free(old_head);
-    return;
-}
-*/
 
 /*
 @brief check if the client given is connected to the server
@@ -349,14 +292,134 @@ void pop_queue()
 */
 uint32_t check_valid_client(uint32_t client_id)
 {
-    if(client_id == 0)
+    if (client_id == 0)
         return 0;
     for (int i = 0; i < MAX_CLIENTS; i++)
         if (client_id == active_clients[i])
             return 1;
     return 0;
 }
+int connect_client(char* client_ip, int* port){
+    printf("THE PORT NO I RECEIVED IS %u\n", *port);
+    struct sockaddr_in serv_addr; // ip addr
+    struct hostent *server;       // struct for host info
+    char buffer[256];
+    int tmp_sock = socket(AF_INET, SOCK_STREAM, 0); // get socket file descriptor us TCP standard
+    if (tmp_sock < 0)                           // failure
+        error("ERROR opening socket");
+    server = gethostbyname(client_ip); // get host name
+    if (server == NULL)
+    { // failure
+        fprintf(stderr, "ERROR, no such host\n");
+        return -1;
+    }
+    // printf("GOT SERVER NAME\n");
+    bzero((char *)&serv_addr, sizeof(serv_addr)); // zero out server address with given size
+    serv_addr.sin_family = AF_INET;               // TCP
+    bcopy((char *)server->h_addr,
+          (char *)&serv_addr.sin_addr.s_addr,
+          server->h_length); // copy address
+    serv_addr.sin_port = htons(*port);
+    // printf("h_addr: %s\n", inet_ntoa(serv_addr.sin_addr));
+    if (connect(tmp_sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+        error("ERROR connecting"); // connect or FAILURE    
+    printf("FINISHED CONNECTION WITH CLIENT!\n");
+    return tmp_sock;
+}
 
+/*
+@brief Same as client read but for connection between clients. Does not perform clean up on exit
+*/
+void *client_p2p_read(void *socket_fd)
+{
+    struct args * arguments = socket_fd;
+    int socket = arguments->socket;
+    int conn_id = arguments->others_id;
+    uint8_t * my_buffer = arguments->buffer;
+    int n;
+    while (1)
+    {
+        n = read(socket, my_buffer, msg_size);
+        if (n == 0)
+            break;
+        switch (my_buffer[0])
+        {
+        case ABORT:                      // transaction failed
+            next_block->status = FAILED; // we only receive this after we get lock so next block is our block
+            client_flags |= BAL_RCVD;    // flag sender that we have received FAILED from the bank.
+            printf("TRANSACTION ABORTED\n");
+            break;
+        case BALANCE: // response from bank to update the local balance so we can pick an amount to request
+            pthread_mutex_lock(&blockchain_lock);
+            int *works = memcpy(&my_balance, ((uint32_t *)(my_buffer + 1)), sizeof(uint32_t)); // copy over balance
+            printf("BALANCE RECEIVED: $%u\n", my_balance);
+            client_flags |= BAL_RCVD; // flag sender that we have received bank balance and updated our local knowledge of the value
+            pthread_mutex_unlock(&blockchain_lock);
+            break;
+        case REQ:                                            // received a request to send
+            printf("USING P2P CONNECTION\n");
+            struct blockchain *req_chain = new_blockchain(); // make a new blockchain member
+            struct blockchain *rcv_chain = (struct blockchain *)(my_buffer + 1);
+            // printf("copying chain\n");
+            copy_blockchain(rcv_chain, req_chain); // copy the blockchain member that was sent over.
+            // printf("adding copy %u\n", req_chain->status);
+            printf("REQUEST RECEIVED FROM CLIENT %u\n", rcv_chain->transaction.sender);
+            add_blockchain(req_chain); // add it to our list. This will overwrite the prev ptr so it will be completely local after this
+            my_buffer[0] = REPLY;
+            memcpy((uint32_t *)(my_buffer + 1), &(req_chain->transaction.sender), sizeof(uint32_t));
+            memcpy((uint32_t *)(my_buffer + 5), &(pid), sizeof(uint32_t));
+            write(socket, my_buffer, msg_size); // send off the reply right away. No need to use write thread
+            pthread_mutex_lock(&bank_lock);
+            lamp_clock = (lamp_clock > req_chain->transaction.lampstamp.time) ? (lamp_clock + 1) : (req_chain->transaction.lampstamp.time + 1);
+            printf("CLOCK UPDATED TO: %u\n", lamp_clock);
+            pthread_mutex_unlock(&bank_lock);
+            break;
+        case REPLY:
+            reply_count++; // increase our reply count
+            printf("RECEIVED REPLY FROM CLIENT %u\n", *((uint32_t *)(my_buffer + 5)));
+            if (reply_count == counted_clients)
+            {                             // if we recieved the amount of messages we anticipated, flag
+                client_flags |= REP_RCVD; // flag sender that we have received all replies
+                reply_count = 0;
+            }
+            break;
+        case RELEASE:
+            printf("THE LOCK HAS BEEN RELEASED\n");
+            block_finished(my_buffer[1]);
+            client_flags |= LCK_RELEASE; // flag sender to try again for the lock
+            break;
+        case CLIENT_ADDED:
+            printf("A NEW CLIENT HAS JOINED THE NETWORK\n");
+            if (client_count < MAX_CLIENTS)
+            {
+                client_count++;
+                for (int i = 0; i < MAX_CLIENTS; i++)
+                {
+                    if (active_clients[i] == 0)
+                    {
+                        active_clients[i] = *((uint32_t *)(my_buffer + 1));
+                        break;
+                    }
+                }
+            }
+            break;
+        case CLIENT_REMOVED:
+            client_count--;
+            uint32_t removed_client = *((uint32_t *)(my_buffer + 1));
+            for (int i = 0; i < MAX_CLIENTS; i++)
+            {
+                if (active_clients[i] == removed_client)
+                {
+                    active_clients[i] = 0;
+                    break;
+                }
+            }
+        }
+    }
+    printf("CLIENT DISCONNECTING\n");
+    //close(socket);
+    return NULL;
+}
 /*
 @brief thread function to listen for messages and update the client on what to do
 @param socket the socket the client is reading from
@@ -370,7 +433,6 @@ void *client_read(void *socket_fd)
         n = read(socket, rx_buffer, msg_size);
         if (n == 0)
             break;
-        // printf("GOT A MESSAGE %u\n", rx_buffer[0]);
         switch (rx_buffer[0])
         {
         case ABORT:                      // transaction failed
@@ -378,9 +440,9 @@ void *client_read(void *socket_fd)
             client_flags |= BAL_RCVD;    // flag sender that we have received FAILED from the bank.
             printf("TRANSACTION ABORTED\n");
             break;
-        case BALANCE:                                                             // response from bank to update the local balance so we can pick an amount to request
+        case BALANCE: // response from bank to update the local balance so we can pick an amount to request
             pthread_mutex_lock(&blockchain_lock);
-            int* works = memcpy(&my_balance, ((uint32_t *)(rx_buffer + 1)), sizeof(uint32_t)); // copy over balance
+            int *works = memcpy(&my_balance, ((uint32_t *)(rx_buffer + 1)), sizeof(uint32_t)); // copy over balance
             printf("BALANCE RECEIVED: $%u\n", my_balance);
             client_flags |= BAL_RCVD; // flag sender that we have received bank balance and updated our local knowledge of the value
             pthread_mutex_unlock(&blockchain_lock);
@@ -415,7 +477,34 @@ void *client_read(void *socket_fd)
             client_flags |= LCK_RELEASE; // flag sender to try again for the lock
             break;
         case CLIENT_ADDED:
-            printf("A NEW CLIENT HAS JOINED THE NETWORK\n");
+            if (client_count < MAX_CLIENTS)
+            {
+                client_count++;
+                for (int i = 0; i < MAX_CLIENTS; i++)
+                {   
+                    if (active_clients[i] == 0)
+                    {
+                        active_clients[i] = *((uint32_t *)(rx_buffer + 1));
+                        read_threads[i] = malloc(sizeof(pthread_t));
+                        writer_socket_no[i] = accept(my_connect_socket,
+                                         (struct sockaddr *)&clients_addr,
+                                         &clilength);//wait on new client to connect
+                        if (writer_socket_no[i] < 0)
+                            error("ERROR on accept");
+                        printf("A CLIENT %u HAS CONNECTED TO MY SOCKET!\n", active_clients[i]);
+                        pthread_mutex_lock(&bank_lock);
+                        client_args.buffer = rx_buffs[i];
+                        client_args.others_id = active_clients[i];
+                        client_args.socket = writer_socket_no[i];
+                        pthread_create(read_threads[i], 0, &client_p2p_read, &client_args);
+                        pthread_mutex_unlock(&bank_lock);
+                        break;
+                    }
+                }
+            }
+            break;
+        case CLIENT_CONNECT:
+            printf("CONNECTING TO OTHER CLIENT\n");
             if (client_count < MAX_CLIENTS)
             {
                 client_count++;
@@ -424,12 +513,25 @@ void *client_read(void *socket_fd)
                     if (active_clients[i] == 0)
                     {
                         active_clients[i] = *((uint32_t *)(rx_buffer + 1));
+                        read_threads[i] = malloc(sizeof(pthread_t));
+                        printf("IP:%s PORT:%u\n", rx_buffer+9, *(int*)(rx_buffer+5));
+                        writer_socket_no[i] = connect_client((char*)(rx_buffer+9), (int*)(rx_buffer+5));
+                        if (writer_socket_no[i] < 0)
+                            error("ERROR on connect");
+                        printf("I HAVE CONNECTED TO CLIENT %u!\n", active_clients[i]);
+                        pthread_mutex_lock(&bank_lock);
+                        client_args.buffer = rx_buffs[i];
+                        client_args.others_id = active_clients[i];
+                        client_args.socket = writer_socket_no[i];
+                        pthread_create(read_threads[i], 0, &client_p2p_read, &client_args);
+                        pthread_mutex_unlock(&bank_lock);
                         break;
                     }
                 }
             }
             break;
         case CLIENT_REMOVED:
+            printf("REMOVING CLIENT DATA\n");
             client_count--;
             uint32_t removed_client = *((uint32_t *)(rx_buffer + 1));
             for (int i = 0; i < MAX_CLIENTS; i++)
@@ -437,12 +539,19 @@ void *client_read(void *socket_fd)
                 if (active_clients[i] == removed_client)
                 {
                     active_clients[i] = 0;
+                    close(writer_socket_no[i]);
+                    writer_socket_no[i] = 0;
+                    if(read_threads[i] != NULL){
+                    pthread_cancel(*read_threads[i]);
+                    free(read_threads[i]);}
+                    read_threads[i] = NULL;
+                    printf("FINISHED REMOVING DATA\n");
                     break;
                 }
             }
         }
     }
-    printf("EXITING\n");
+    printf("LEAVING SERVER\n");
     pthread_cancel(sending_thread);
     struct blockchain *block_ptr = block_chain;
     while (block_ptr != NULL)
@@ -455,7 +564,6 @@ void *client_read(void *socket_fd)
     exit(0);
     return NULL;
 }
-
 /*
 @brief The thread function for the client to send data
 @param socket the socket of the server we are operating on
@@ -507,9 +615,13 @@ void *client_send(void *socket_fd)
             memcpy((struct blockchain *)(tx_buffer + 1), new_trans, sizeof(struct blockchain));
             counted_clients = client_count; // the scenario we will build is not quickly adding or removing clients so no need to lock
             reply_count = 0;
-            client_flags &= ~REP_RCVD;      // clear reply flags
-            sleep(2);                       // delay for other clients to send
-            write(socket, tx_buffer, msg_size); // send out req
+            client_flags &= ~REP_RCVD;          // clear reply flags
+            sleep(2);                           // delay for other clients to send
+            for(int i = 0; i < MAX_CLIENTS; i++){
+                if(active_clients[i] != 0){
+                    write(writer_socket_no[i], tx_buffer, msg_size); // send out req to all clients
+                }
+            }
             printf("WAITING FOR REPLIES FROM %u CLIENTS\n", counted_clients);
             while (!(client_flags)&REP_RCVD)
                 ;     // wait until all replies are received
@@ -520,7 +632,7 @@ void *client_send(void *socket_fd)
             // pthread_mutex(&bank_lock);
             tx_buffer[0] = BALANCE;
             client_flags &= ~BAL_RCVD;
-            write(socket, tx_buffer, msg_size);
+            write(socket, tx_buffer, msg_size);//send out bank info request
             while (!(client_flags & BAL_RCVD))
                 ;
             client_flags &= ~BAL_RCVD;
@@ -530,11 +642,15 @@ void *client_send(void *socket_fd)
                 tx_buffer[0] = COMMIT;
                 next_block->status = FAILED;
                 memcpy(tx_buffer + 1, next_block, sizeof(struct blockchain));
-                write(socket, tx_buffer, msg_size);                
+                write(socket, tx_buffer, msg_size);
                 tx_buffer[0] = RELEASE;
                 tx_buffer[1] = FAILED;
                 block_finished(FAILED);
-                write(socket, tx_buffer, msg_size);
+                for(int i = 0; i < MAX_CLIENTS; i++){
+                    if(active_clients[i] != 0){
+                      write(writer_socket_no[i], tx_buffer, msg_size); // send out req to all clients
+                    }
+                }
                 printf("TRANSACTION FAILED\n");
             }
             else
@@ -546,13 +662,15 @@ void *client_send(void *socket_fd)
                 block_finished(SUCCESS);
                 tx_buffer[0] = RELEASE;
                 tx_buffer[1] = SUCCESS;
-                write(socket, tx_buffer, msg_size);
+                for(int i = 0; i < MAX_CLIENTS; i++){
+                    if(active_clients[i] != 0){
+                      write(writer_socket_no[i], tx_buffer, msg_size); // send out release to all clients
+                    }
+                }
                 my_balance -= trans_amount;
                 printf("TRANSACTION SUCCESSFUL\n");
             }
-            // pthread_mutex_unlock(&bank_lock);
             printf("MY BALANCE AFTER TRANSACTION IS $%u\n\n", my_balance);
-            // printf("TRANSACTION COMPLETE\n\n");
             break;
         case 3:
             printf("CLOCK TIME: %u\n", lamp_clock);
@@ -570,7 +688,8 @@ void *client_send(void *socket_fd)
                        : cur_blk->status == SUCCESS ? "SUCCESS"
                                                     : "ABORT");
                 printf("HASH: ");
-                for(int i = 0; i < 32; i++){
+                for (int i = 0; i < 32; i++)
+                {
                     printf("%02x", cur_blk->prev_hash[i]);
                 }
                 printf("\n\n");
@@ -596,6 +715,7 @@ void *client_send(void *socket_fd)
     return NULL;
 }
 
+
 int main(int argc, char *argv[])
 {
     pthread_mutex_init(&blockchain_lock, 0);
@@ -605,6 +725,10 @@ int main(int argc, char *argv[])
     for (int i = 0; i < MAX_CLIENTS; i++)
     {
         active_clients[i] = 0;
+        writer_socket_no[i] = 0;
+        tx_buffs[i] = malloc(msg_size);
+        rx_buffs[i] = malloc(msg_size);
+        read_threads[i] = NULL;
     }
     char buffer[256];
     if (argc < 3)
@@ -632,31 +756,43 @@ int main(int argc, char *argv[])
     // printf("h_addr: %s\n", inet_ntoa(serv_addr.sin_addr));
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
         error("ERROR connecting"); // connect or FAILURE
-
-    n = read(sockfd, rx_buffer, msg_size);
+    do
+    {
+        n = read(sockfd, rx_buffer, msg_size); // get my info as a client
+    } while (n == 0);
     pid = ((struct client *)rx_buffer)->id;
     my_balance = ((struct client *)rx_buffer)->balance;
+    printf("FINISHED GETTING MY INFO\n");
+    ////////////////////////////////////// Connected and got pid and balance
+    do
+    {
+        n = read(sockfd, rx_buffer, msg_size); // read a port no
+    } while (n == 0);
+    printf("GOT A PORT NUMBER\n");
+    memcpy(&my_port, (int *)(rx_buffer), sizeof(int)); // receive port no
+
+    my_connect_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (my_connect_socket < 0)
+        error("ERROR opening socket");
+    bzero((char *)&my_addr, sizeof(my_addr));
+    portno = my_port;
+    my_addr.sin_family = AF_INET;
+    my_addr.sin_addr.s_addr = INADDR_ANY;
+    my_addr.sin_port = htons(my_port);
+    if (bind(my_connect_socket, (struct sockaddr *)&my_addr,
+             sizeof(my_addr)) < 0)
+        my_addr.sin_port = htons(++my_port);
+    memcpy((int *)tx_buffer, &my_port, sizeof(int));
+    write(sockfd, tx_buffer, msg_size); // write back working port no
+    listen(my_connect_socket, MAX_CLIENTS);
+    clilength = sizeof(clients_addr);
+    printf("MADE SERVER AND LISTENING ON PORT %d\n", my_port);
+
     signal(SIGINT, cleanup);
     pthread_create(&listening_thread, 0, &client_read, &sockfd);
     pthread_create(&sending_thread, 0, &client_send, &sockfd);
-    while (1)
-        ;
+    while (1);
 
-    // while (1)
-    // {
-
-    //     printf("Please enter the message: "); // get a message and zero out buffer and get from stdin
-    //     bzero(buffer, 256);
-    //     fgets(buffer, 255, stdin);
-    //     n = write(sockfd, buffer, strlen(buffer)); // write to socket and send
-    //     if (n < 0)
-    //         error("ERROR writing to socket");
-    //     bzero(buffer, 256);
-    //     n = read(sockfd, buffer, 255); // wait for read message
-    //     if (n < 0)                     // failure message from read
-    //         error("ERROR reading from socket");
-    //     printf("%s\n", buffer); // print the message
-    // }
 
     close(sockfd); // close socket
     return 0;

@@ -21,6 +21,8 @@ struct client{
     uint32_t id;
     uint32_t balance;
     uint32_t loc;//location of client in managed list
+    char ip_addr[16];
+    int port_no;
 };
 
 struct client_queue{
@@ -43,6 +45,7 @@ enum commands{
     COMMIT,
     RELEASE,
     CLIENT_ADDED,
-    CLIENT_REMOVED
+    CLIENT_REMOVED,
+    CLIENT_CONNECT
 };
 
